@@ -30,7 +30,36 @@ DB_PATH = "bodega.db"
 # db_path que le pasen — así la web y la app de escritorio leen y escriben la
 # misma base, en vez de cada una tener su propio archivo SQLite aislado. Sin
 # ella (dev local, tests) se sigue usando el archivo SQLite de siempre.
-SUPABASE_DB_URL = os.environ.get("SUPABASE_DB_URL")
+def _leer_supabase_url():
+    """
+    URL de conexión a la base compartida en Supabase.
+
+    En Streamlit Cloud los secrets se leen de forma confiable con st.secrets.
+    También se exponen como variables de entorno, PERO esa exposición es
+    perezosa: puede no estar poblada todavía en el momento en que se importa
+    este módulo. Por eso consultar os.environ directo a veces devolvía None en
+    la web —aunque el secret estuviera bien puesto— y la app caía a una base
+    SQLite local vacía, sin la nómina de correos, dando "correo no autorizado"
+    para correos que sí estaban cargados. Se consulta st.secrets primero (que
+    fuerza la carga y es el camino confiable en la nube) y se cae a os.environ
+    para la app de escritorio (el .exe), scripts y tests, que no corren dentro
+    de Streamlit y usan la variable de entorno de siempre.
+
+    Es el mismo patrón que ya usaba _password_encargado() para la contraseña
+    del encargado por exactamente esta razón.
+    """
+    try:
+        import streamlit as st
+        if "SUPABASE_DB_URL" in st.secrets:
+            return str(st.secrets["SUPABASE_DB_URL"])
+    except Exception:
+        # fuera de Streamlit (o sin secrets configurados) no hay st.secrets:
+        # se sigue al entorno
+        pass
+    return os.environ.get("SUPABASE_DB_URL")
+
+
+SUPABASE_DB_URL = _leer_supabase_url()
 
 TZ_CHILE = ZoneInfo("America/Santiago")
 
@@ -70,9 +99,15 @@ def get_connection(db_path: str = None):
     propósito, porque con Supabase hay una sola base compartida entre la web
     y la app de escritorio, no un archivo por app. Sin esa variable, se
     comporta como siempre (SQLite local en db_path).
+
+    Se vuelve a resolver la URL en cada llamada (no se usa solo la constante
+    de módulo) porque en Streamlit Cloud el secret puede no estar disponible
+    todavía en el instante en que se importa este módulo; al resolverlo acá,
+    en tiempo de ejecución, ya está poblado. Ver _leer_supabase_url().
     """
-    if SUPABASE_DB_URL:
-        return supabase_pg.SupabaseConnection(SUPABASE_DB_URL)
+    url = _leer_supabase_url()
+    if url:
+        return supabase_pg.SupabaseConnection(url)
     db_path = db_path or DB_PATH
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA foreign_keys = ON")
