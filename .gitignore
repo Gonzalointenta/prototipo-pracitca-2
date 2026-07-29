@@ -1,0 +1,27 @@
+# Base de datos local: NO se sube al repositorio.
+# Contiene solicitudes, correos y contraseñas (hasheadas) reales.
+bodega.db
+bodega_simulacion.db
+*.db
+
+# Secretos: la contraseña del encargado va acá y no debe salir del equipo.
+.streamlit/secrets.toml
+
+# Archivos generados en tiempo de ejecución
+formularios/
+exportes/
+sync_exports/
+export_*.csv
+sync_smc_*.csv
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Empaquetado de la app de escritorio (PyInstaller): el .exe se genera local,
+# no se sube — pesa +100 MB y no tiene nada que compartir vía GitHub.
+build/
+dist/
+*.spec

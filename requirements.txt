@@ -1,0 +1,6 @@
+streamlit
+pandas
+rapidfuzz
+reportlab
+tzdata
+psycopg2-binary
