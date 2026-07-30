@@ -59,7 +59,17 @@ def _obtener_pool(dsn):
             if _pool is not None:
                 _pool.closeall()
             _pool = psycopg2.pool.ThreadedConnectionPool(
-                1, 10, dsn, connect_timeout=TIMEOUT_SEGUNDOS,
+                1, 10, dsn,
+                connect_timeout=TIMEOUT_SEGUNDOS,
+                # Keepalives TCP: ayudan a que las conexiones ociosas no queden
+                # medio-muertas sin avisar. No garantizan nada por sí solos —el
+                # pooler de Supabase igual cierra conexiones ociosas del lado
+                # del servidor—, por eso además execute() reintenta con una
+                # conexión nueva si la que sacó del pool ya estaba cerrada.
+                keepalives=1,
+                keepalives_idle=30,
+                keepalives_interval=10,
+                keepalives_count=5,
             )
             _pool_dsn = dsn
         return _pool
@@ -243,29 +253,93 @@ class SupabaseConnection:
 
     def __init__(self, dsn):
         self._pool = _obtener_pool(dsn)
-        try:
-            self._conn = self._pool.getconn()
-        except psycopg2.Error as e:
-            raise SupabaseError(f"No se pudo conectar a Supabase: {e}") from e
-        self._conn.autocommit = True
+        self._conn = self._tomar_conexion()
 
-    def execute(self, sql, parametros=()):
-        sql_pg = _traducir_placeholders(sql)
+    def _tomar_conexion(self):
+        """
+        Saca una conexión VIVA del pool. El pool puede tener conexiones que ya
+        estaban cerradas (el pooler de Supabase cierra las ociosas): se
+        descartan y se pide otra, hasta conseguir una sana o crear una nueva.
+        """
+        ultimo_error = None
+        for _ in range(6):
+            try:
+                conn = self._pool.getconn()
+            except psycopg2.Error as e:
+                raise SupabaseError(f"No se pudo conectar a Supabase: {e}") from e
+            # Ya cerrada del lado del cliente: al tacho y pedir otra.
+            if getattr(conn, "closed", 0) != 0:
+                self._devolver_cerrando(conn)
+                continue
+            try:
+                conn.autocommit = True
+            except psycopg2.Error as e:
+                ultimo_error = e
+                self._devolver_cerrando(conn)
+                continue
+            return conn
+        raise SupabaseError(
+            f"No se pudo obtener una conexión viva a Supabase: {ultimo_error}"
+        )
+
+    def _devolver_cerrando(self, conn):
+        """Descarta una conexión del pool marcándola para cerrar, sin dejar
+        que un error al hacerlo interrumpa el flujo."""
+        try:
+            self._pool.putconn(conn, close=True)
+        except Exception:
+            pass
+
+    def _descartar_conexion(self):
+        """Devuelve la conexión al pool marcándola para cerrar (close=True):
+        se usa cuando la conexión murió, para que el pool no la vuelva a
+        entregar en vez de reciclarla."""
+        if self._conn is not None:
+            self._devolver_cerrando(self._conn)
+            self._conn = None
+
+    def _ejecutar_una_vez(self, sql_pg, args):
         cur = self._conn.cursor()
         try:
-            cur.execute(sql_pg, tuple(parametros) if parametros else None)
-        except psycopg2.Error as e:
+            cur.execute(sql_pg, args)
+            descripcion = cur.description
+            filas = cur.fetchall() if descripcion is not None else []
+            rowcount = cur.rowcount
+        finally:
             cur.close()
-            raise SupabaseError(f"{e} — SQL: {sql}") from e
-
-        descripcion = cur.description
-        filas = cur.fetchall() if descripcion is not None else []
         lastrowid = None
         if descripcion is not None and filas and "returning" in sql_pg.lower():
             lastrowid = filas[0][0]
-        resultado = SupabaseCursor(descripcion, filas, cur.rowcount, lastrowid)
-        cur.close()
-        return resultado
+        return SupabaseCursor(descripcion, filas, rowcount, lastrowid)
+
+    def execute(self, sql, parametros=()):
+        sql_pg = _traducir_placeholders(sql)
+        args = tuple(parametros) if parametros else None
+
+        # El pooler de Supabase cierra las conexiones ociosas, así que una
+        # conexión sacada del pool puede estar muerta del lado del servidor y
+        # eso solo se descubre al usarla ("server closed the connection
+        # unexpectedly"). Cuando pasa, se descarta esa conexión y se reintenta
+        # con una nueva. Se prueban unas pocas porque el pool puede tener más
+        # de una conexión muerta a la vez tras un rato de inactividad.
+        #
+        # Reintentar es seguro acá: el error de conexión-muerta se da al tomar
+        # la conexión, ANTES de que la sentencia llegue a ejecutarse en el
+        # servidor (el propio mensaje dice "before or while processing"), así
+        # que no hay riesgo de aplicar dos veces una escritura. Además, las
+        # escrituras de este sistema son upserts idempotentes (ON CONFLICT).
+        ultimo_error = None
+        for _intento in range(3):
+            if self._conn is None:
+                self._conn = self._tomar_conexion()
+            try:
+                return self._ejecutar_una_vez(sql_pg, args)
+            except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
+                ultimo_error = e
+                self._descartar_conexion()  # muerta: al tacho y probar otra
+            except psycopg2.Error as e:
+                raise SupabaseError(f"{e} — SQL: {sql}") from e
+        raise SupabaseError(f"{ultimo_error} — SQL: {sql}") from ultimo_error
 
     def executemany(self, sql, secuencia_parametros):
         ultimo = None
@@ -301,6 +375,14 @@ class SupabaseConnection:
         pass
 
     def close(self):
-        if self._conn is not None:
-            self._pool.putconn(self._conn)
-            self._conn = None
+        if self._conn is None:
+            return
+        try:
+            # Si la conexión quedó cerrada o en mal estado, se descarta
+            # (close=True) para que el pool no la recicle; si está sana, vuelve
+            # al pool para reusar el keep-alive de TCP/TLS.
+            rota = getattr(self._conn, "closed", 0) != 0
+            self._pool.putconn(self._conn, close=rota)
+        except Exception:
+            pass
+        self._conn = None
