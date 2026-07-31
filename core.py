@@ -601,6 +601,51 @@ def alias_de_producto(codigo_producto, db_path: str = None) -> pd.DataFrame:
     return df
 
 
+def listar_alias_para_gestion(filtro="", solo_manuales=True, limite=300,
+                              db_path: str = None) -> pd.DataFrame:
+    """
+    Alias registrados, con su producto, para revisarlos y corregirlos SIN
+    tener que saber el código de cada producto.
+
+    Por defecto (solo_manuales=True) excluye el alias que es igual al nombre
+    estándar del producto: ese se crea solo al cargar el catálogo (cada
+    producto queda buscable por su propio nombre) y no tiene sentido tocarlo
+    acá. Quedan así a la vista los alias que agregó el encargado a mano, que
+    son los que pueden estar mal escritos o apuntando al producto equivocado.
+
+    filtro: si se entrega, filtra por texto del alias O nombre del producto
+    (sin distinguir mayúsculas). Vacío = todos (hasta 'limite').
+    """
+    db_path = db_path or DB_PATH
+    condiciones = ["p.activo = 1"]
+    params = []
+    if solo_manuales:
+        # el alias auto-generado se insertó con texto_alias EXACTAMENTE igual
+        # al nombre estándar (ver cargar_catalogo)
+        condiciones.append("a.texto_alias <> p.nombre_estandar")
+    filtro = (filtro or "").strip().lower()
+    if filtro:
+        condiciones.append("(LOWER(a.texto_alias) LIKE ? OR LOWER(p.nombre_estandar) LIKE ?)")
+        params.extend([f"%{filtro}%", f"%{filtro}%"])
+    where = " AND ".join(condiciones)
+    params.append(int(limite))
+
+    conn = get_connection(db_path)
+    df = pd.read_sql(
+        f"""
+        SELECT a.id, a.texto_alias, a.codigo_producto, p.nombre_estandar
+        FROM alias_productos a
+        JOIN productos p ON p.codigo = a.codigo_producto
+        WHERE {where}
+        ORDER BY p.nombre_estandar, a.id
+        LIMIT ?
+        """,
+        conn, params=tuple(params),
+    )
+    conn.close()
+    return df
+
+
 def eliminar_alias(id_alias, db_path: str = None):
     """
     Borra un alias. No deja al producto sin ninguna forma de ser encontrado:
