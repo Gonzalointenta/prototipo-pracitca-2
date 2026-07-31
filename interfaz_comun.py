@@ -426,6 +426,15 @@ def panel_acceso():
     el correo esté en la nómina autorizada por el encargado; la contraseña
     se pide dos veces para asegurarse de que quedó bien escrita.
     """
+    # Logo municipal en grande, centrado, arriba del acceso. Se elige la
+    # versión clara u oscura según el tema activo (ver _logo_segun_tema): el
+    # logo azul se pierde sobre el fondo carbón del modo oscuro y el blanco
+    # desaparece sobre fondo claro.
+    logo_acceso = _logo_segun_tema()
+    if logo_acceso.exists():
+        _, col_logo, _ = st.columns([1, 1, 1])
+        col_logo.image(str(logo_acceso), use_container_width=True)
+
     st.subheader("Acceso de solicitantes")
     tab_login, tab_registro = st.tabs(["Ingresar", "Registrarme por primera vez"])
 
