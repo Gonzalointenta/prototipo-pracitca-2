@@ -1,0 +1,66 @@
+# Apariencia del sistema.
+#
+# Se define con el mecanismo propio de Streamlit ([theme] y [theme.dark]) y no
+# con CSS: intentar forzar los colores por CSS pisaba los estilos internos y
+# dejaba el modo claro con partes oscuras.
+#
+# [theme]      -> modo claro
+# [theme.dark] -> modo oscuro
+#
+# Tipografía: Roboto, la fuente de Google/Material Design, para que la app se
+# vea como las interfaces de Google. Se declara con [[theme.fontFaces]]
+# (mecanismo propio de Streamlit, no CSS) apuntando a los archivos woff2 en
+# un CDN estable. Si no hubiera internet, Streamlit cae solo a la fuente
+# sans-serif del sistema. Los colores/tonalidades de modo claro y oscuro se
+# mantienen tal cual — solo cambia la letra.
+
+[[theme.fontFaces]]
+family = "Roboto"
+url = "https://cdn.jsdelivr.net/npm/@fontsource/roboto@5/files/roboto-latin-400-normal.woff2"
+weight = 400
+style = "normal"
+
+[[theme.fontFaces]]
+family = "Roboto"
+url = "https://cdn.jsdelivr.net/npm/@fontsource/roboto@5/files/roboto-latin-500-normal.woff2"
+weight = 500
+style = "normal"
+
+[[theme.fontFaces]]
+family = "Roboto"
+url = "https://cdn.jsdelivr.net/npm/@fontsource/roboto@5/files/roboto-latin-700-normal.woff2"
+weight = 700
+style = "normal"
+
+[theme]
+base = "light"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#7CF2D1"
+textColor = "#000000"
+primaryColor = "#1B4F72"
+borderColor = "#9AD9C6"
+linkColor = "#1B4F72"
+font = "Roboto, sans-serif"
+
+[theme.dark]
+backgroundColor = "#121212"
+secondaryBackgroundColor = "#1C1C1C"
+textColor = "#FFFFFF"
+primaryColor = "#4899CF"
+borderColor = "#4A4A4A"
+linkColor = "#7CC7EE"
+font = "Roboto, sans-serif"
+
+[server]
+maxUploadSize = 20
+
+[browser]
+gatherUsageStats = false
+
+[client]
+# Este es el config de la WEB (app.py, solicitantes). Va en "minimal" para
+# ocultar el menú ☰ por completo: sin "ver código fuente", "deploy" ni nada de
+# desarrollo. NO copiar acá el config.toml de la raíz: ese es el del .exe del
+# encargado y usa "viewer" a propósito (para dejarle el toggle de tema). Los
+# dos archivos deben quedar distintos SOLO en este toolbarMode.
+toolbarMode = "minimal"

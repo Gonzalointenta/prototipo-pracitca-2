@@ -172,6 +172,16 @@ if core.SUPABASE_DB_URL and not st.session_state.get("respaldo_local_hecho"):
 
 mostrar_sidebar_cuenta(identidad_sesion)
 
+# Pista para cambiar entre modo claro y oscuro. Streamlit no deja hacerlo con
+# un botón desde el código (el tema se fija al cargar), así que se usa su menú
+# nativo, que en esta app de escritorio está habilitado (toolbarMode="viewer"
+# en config.toml). Los temas claro/oscuro ya usan los colores y la fuente
+# Roboto de la app.
+st.sidebar.caption(
+    "🎨 **Modo claro / oscuro:** menú ☰ (arriba a la derecha) → "
+    "*Settings* → *Choose app theme* → Light / Dark / Use system setting."
+)
+
 if core.actualizacion_semanal_pendiente():
     if not st.session_state.alerta_sync_vista:
         c_alerta, c_cerrar = st.columns([6, 1])
