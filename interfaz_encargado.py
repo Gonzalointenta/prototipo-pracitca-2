@@ -25,7 +25,15 @@ from interfaz_comun import boton_descargar_archivo, boton_imprimir
 
 
 def panel_solicitudes_activas():
-    st.subheader("Solicitudes por procesar")
+    cab_izq, cab_der = st.columns([4, 1])
+    cab_izq.subheader("Solicitudes por procesar")
+    # Botón para recargar y ver si entraron solicitudes nuevas desde la web
+    # sin tener que cambiar de pestaña. Solo fuerza un rerun: la lista de
+    # activas NO está cacheada (se relee de la base en cada corrida), así que
+    # con esto aparece lo que se haya creado recién.
+    if cab_der.button("🔄 Actualizar", width='stretch',
+                      help="Recarga para ver solicitudes nuevas recién ingresadas."):
+        st.rerun()
     st.caption(
         "Solo las pendientes. Al cerrar o anular una solicitud, esta sale de la pantalla "
         "y queda disponible en Pedidos completados y en el Historial."
@@ -125,11 +133,15 @@ def panel_solicitudes_activas():
             c1, c2 = st.columns([4, 1])
             c1.markdown(f"**{fila['producto']}**"
                         + (f"  \n{fila['mensaje_sistema']}" if fila["mensaje_sistema"] else ""))
+            # cantidad_entregada aún NULL la lee pandas como None o NaN; en
+            # ambos casos se arranca desde lo solicitado. Se usa pd.isna (no
+            # solo `is None`) porque un NaN no es None y hacía reventar int().
             base = fila["cantidad_entregada"]
-            if base is None:
+            if base is None or pd.isna(base):
                 base = fila["cantidad_solicitada"]
             cantidades[fila["producto"]] = c2.number_input(
-                f"entregado — {fila['producto']}", min_value=0, step=1, value=int(base),
+                f"entregado — {fila['producto']}", min_value=0, step=1,
+                value=core.formatear_cantidad(base),
                 key=f"ent_{n}_{fila['producto']}", label_visibility="collapsed",
             )
 
@@ -386,11 +398,14 @@ def panel_historial():
         st.success("Excel actualizado.")
 
     if os.path.exists(core.RUTA_EXCEL_HISTORIAL):
+        nombre_excel = os.path.basename(core.RUTA_EXCEL_HISTORIAL)
         boton_descargar_archivo(
-            core.RUTA_EXCEL_HISTORIAL, "DESCARGAR historial_bodega.xlsx",
-            nombre_archivo="historial_bodega.xlsx",
+            core.RUTA_EXCEL_HISTORIAL, f"ABRIR «{nombre_excel}»",
+            nombre_archivo=nombre_excel, key="descargar_excel_historial",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+        st.caption(f"Está en el Escritorio como «{nombre_excel}» — es siempre el mismo "
+                   "archivo, se actualiza en su lugar cada vez que lo genera.")
 
     # ------------------------------------------------- recopilador de impresión
     st.divider()
@@ -424,7 +439,7 @@ def panel_historial():
         boton_descargar_archivo(
             ruta, "Imprimir compilado de comprobantes seleccionados",
             nombre_archivo=f"comprobantes_{str(periodo_sel).replace('/', '-').replace(' ', '_')}.pdf",
-            mime="application/pdf",
+            mime="application/pdf", key="compilado_historial",
         )
 
     # ------------------------------------------------------------- el detalle
@@ -643,6 +658,7 @@ def panel_pedidos_completados():
         boton_descargar_archivo(
             ruta, "Imprimir compilado de comprobantes seleccionados",
             nombre_archivo="comprobantes_agrupados.pdf", mime="application/pdf",
+            key="compilado_pedidos_completados",
         )
 
 
@@ -802,9 +818,8 @@ def panel_estadisticas():
     st.subheader("Estadísticas de consumo")
     st.caption(
         "Quién consume y qué se consume. Se calcula sobre las solicitudes cerradas, usando "
-        "la cantidad realmente entregada. No se valoriza en pesos: SMC no informa un precio "
-        "unitario confiable por código (solo el valor total de saldo), así que cualquier "
-        "'valor consumido' calculado acá sería un número inventado."
+        "la cantidad realmente entregada. El valor en pesos usa el valor unitario fijado en "
+        "el último corte (valor total del saldo ÷ cantidad), descontado por cada entrega."
     )
 
     hoy = core.hoy_chile()
@@ -813,7 +828,7 @@ def panel_estadisticas():
         "Período", ["Este año", "Últimos 12 meses", "Este mes", "Todo", "Personalizado"],
         index=0, key="rango_stats",
     )
-    metrica = c2.selectbox("Medir por", ["unidades", "solicitudes"], index=0)
+    metrica = c2.selectbox("Medir por", ["unidades", "solicitudes", "valor en pesos"], index=0)
     top_n = c3.slider("Cuántos mostrar", 5, 20, 10)
 
     desde = hasta = None
@@ -829,18 +844,24 @@ def panel_estadisticas():
         hasta = ch.date_input("Hasta", value=hoy, key="stats_hasta")
 
     datos = core.estadisticas_consumo(desde=desde, hasta=hasta)
-    columna = {"unidades": "unidades", "solicitudes": "solicitudes"}[metrica]
+    columna = {"unidades": "unidades", "solicitudes": "solicitudes",
+               "valor en pesos": "valor"}[metrica]
 
     if datos["departamento"].empty:
         st.info("No hay solicitudes cerradas en este período.")
         return
 
+    def _miles(n):
+        return f"{int(n):,}".replace(",", ".")
+
     # ------------------------------------------------------------------ KPIs
     total_sol = int(datos["departamento"]["solicitudes"].sum())
     total_uni = int(datos["departamento"]["unidades"].sum())
-    k1, k2 = st.columns(2)
-    k1.metric("Solicitudes entregadas", f"{total_sol:,}".replace(",", "."))
-    k2.metric("Unidades entregadas", f"{total_uni:,}".replace(",", "."))
+    total_val = int(datos["departamento"]["valor"].sum()) if "valor" in datos["departamento"] else 0
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Solicitudes entregadas", _miles(total_sol))
+    k2.metric("Unidades entregadas", _miles(total_uni))
+    k3.metric("Valor entregado", f"${_miles(total_val)}")
 
     def _grafico(df, etiqueta, titulo, ayuda=None):
         if df.empty or columna not in df:

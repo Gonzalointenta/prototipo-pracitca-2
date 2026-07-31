@@ -47,6 +47,17 @@ _pool_lock = threading.Lock()
 _pool = None
 _pool_dsn = None
 
+# Conexiones físicas a las que ya se les corrió "SET extra_float_digits = 3".
+# El pooler de Supabase ignora ese parámetro en el connect (options=...), así
+# que hay que aplicarlo con un SET; pero un SET por cada get_connection sería un
+# round-trip de más cada vez. Como las conexiones del pool se reutilizan, basta
+# hacerlo UNA vez por conexión física: se guarda su id() acá y se saltea si ya
+# está. Por qué importa: sin esto, Postgres serializa los REAL (valores en
+# pesos) con solo 6 dígitos significativos y los montos sobre ~1 millón se leen
+# redondeados (se guarda 1.032.856 y se lee 1.032.860), descuadrando el valor
+# del inventario. Ver _tomar_conexion / _devolver_cerrando.
+_conexiones_configuradas = set()
+
 
 class SupabaseError(Exception):
     """Error devuelto por la base (SQL inválido, etc.) o de red."""
@@ -273,6 +284,7 @@ class SupabaseConnection:
                 continue
             try:
                 conn.autocommit = True
+                self._configurar_precision(conn)
             except psycopg2.Error as e:
                 ultimo_error = e
                 self._devolver_cerrando(conn)
@@ -282,9 +294,22 @@ class SupabaseConnection:
             f"No se pudo obtener una conexión viva a Supabase: {ultimo_error}"
         )
 
+    def _configurar_precision(self, conn):
+        """Aplica 'SET extra_float_digits = 3' una sola vez por conexión física
+        (ver _conexiones_configuradas)."""
+        if id(conn) in _conexiones_configuradas:
+            return
+        cur = conn.cursor()
+        try:
+            cur.execute("SET extra_float_digits = 3")
+        finally:
+            cur.close()
+        _conexiones_configuradas.add(id(conn))
+
     def _devolver_cerrando(self, conn):
         """Descarta una conexión del pool marcándola para cerrar, sin dejar
         que un error al hacerlo interrumpa el flujo."""
+        _conexiones_configuradas.discard(id(conn))
         try:
             self._pool.putconn(conn, close=True)
         except Exception:

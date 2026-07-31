@@ -13,6 +13,7 @@ import hashlib
 import os
 import re
 import sqlite3
+import time
 import unicodedata
 import uuid
 from datetime import datetime, timedelta
@@ -92,6 +93,56 @@ def normalizar(texto: str) -> str:
     return texto
 
 
+def valor_unitario_desde(valor_saldo, saldo) -> float:
+    """
+    Valor unitario (en pesos) de un producto = valor total del saldo dividido
+    por la cantidad, calculado UNA sola vez al momento del escaneo/corte.
+
+    SMC solo informa el valor TOTAL del saldo por código (no un precio
+    unitario), así que este cociente es la única forma de tener un valor por
+    unidad. Se fija al cargar el catálogo y NO se recalcula al hacer
+    solicitudes: a medida que se entrega stock se descuenta este valor fijo
+    del total (ver cerrar_solicitud), de modo que el inventario en pesos baja
+    solo y cada movimiento tiene un valor en plata consistente con el corte.
+    Recalcularlo con el saldo ya movido daría un precio distinto y produciría
+    disconformidades con SMC — por eso se calcula solo acá, con los valores
+    del corte.
+
+    Si el saldo del corte es 0 (o falta el valor), no hay de dónde derivar un
+    unitario y se devuelve 0.
+    """
+    try:
+        saldo = float(saldo)
+        valor_saldo = float(valor_saldo)
+    except (TypeError, ValueError):
+        return 0.0
+    if saldo <= 0 or valor_saldo <= 0:
+        return 0.0
+    return valor_saldo / saldo
+
+
+def _normalizar_columna_mensaje(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Deja la columna 'mensaje_sistema' con "" (cadena vacía) donde no hay
+    observación, en vez del NaN que devuelve pandas al leer un NULL.
+
+    Por qué importa: los productos que tienen stock suficiente se guardan con
+    mensaje_sistema en NULL. Al leerlos, pandas los entrega como NaN, y como
+    en Python bool(nan) es True, el código de la interfaz que hacía
+    `if fila["mensaje_sistema"]:` los tomaba como si tuvieran mensaje y
+    mostraba literalmente el texto "nan" al lado de cada producto sano —tanto
+    en la vista del solicitante como en la del encargado—. Con "" (que es
+    falsy) esas comprobaciones vuelven a funcionar y las celdas quedan en
+    blanco. Se aplica en el origen (las funciones que arman estas tablas) para
+    que todas las vistas queden bien sin repetir el arreglo en cada una.
+    """
+    if "mensaje_sistema" in df.columns:
+        df["mensaje_sistema"] = [
+            str(m).strip() if pd.notna(m) else "" for m in df["mensaje_sistema"]
+        ]
+    return df
+
+
 def get_connection(db_path: str = None):
     """
     Devuelve la conexión a usar. Si hay credenciales de Supabase configuradas
@@ -114,6 +165,51 @@ def get_connection(db_path: str = None):
     return conn
 
 
+# ------------------------------------------------------- caché de lecturas
+#
+# Streamlit re-ejecuta TODO el script en cada interacción (cada tecla del
+# buscador, cada clic, cada cambio de pestaña) y, con st.tabs, además corren
+# los 11 paneles del encargado en cada corrida. Sin caché eso repetía las
+# mismas consultas pesadas contra la base remota decenas de veces: cargar el
+# índice completo de alias en cada tecla, releer todo el inventario al pintar
+# cada panel, etc. Contra Supabase (~85 ms por consulta) eso era el ~1.5 s de
+# lag por acción.
+#
+# Se cachean SOLO lecturas de datos de REFERENCIA que cambian poco (catálogo
+# de productos e índice de alias del buscador). Los datos transaccionales
+# —solicitudes activas, correos autorizados, historial— NO se cachean: tienen
+# que verse frescos al instante (una solicitud nueva debe aparecer apenas se
+# crea) y su consulta es liviana igual.
+#
+# El caché es un TTL corto por proceso: dentro de una ráfaga de clics se reusa
+# lo ya cargado, y se refresca solo cada tanto. Además se invalida explícita-
+# mente cuando el encargado toca el catálogo, los alias o el stock (ver
+# invalidar_cache_lecturas), para que esos cambios se vean sin esperar el TTL.
+_CACHE_TTL_SEG = 20
+_cache_lecturas = {}
+
+
+def _leer_cacheado(clave, productor, ttl=_CACHE_TTL_SEG):
+    ahora = time.monotonic()
+    entrada = _cache_lecturas.get(clave)
+    if entrada is not None and ahora - entrada[0] < ttl:
+        return entrada[1]
+    valor = productor()
+    _cache_lecturas[clave] = (ahora, valor)
+    return valor
+
+
+def invalidar_cache_lecturas():
+    """
+    Vacía el caché de datos de referencia. Se llama tras cualquier escritura
+    que cambie el catálogo, los alias o el saldo de un producto (cargar
+    catálogo, crear/editar/borrar alias, cerrar una solicitud, importar
+    saldos), para que el cambio se vea de inmediato en el buscador y en el
+    inventario sin esperar a que expire el TTL.
+    """
+    _cache_lecturas.clear()
+
+
 def generar_folio(prefijo="SOL") -> str:
     """
     OBSOLETO (día 4.5). El folio ahora es "Solicitud-<correlativo>" (ver
@@ -127,8 +223,12 @@ def generar_folio(prefijo="SOL") -> str:
 def formatear_cantidad(valor) -> int:
     """Los productos de bodega se cuentan en unidades enteras (cajas, resmas,
     unidades, etc.) — no hay medio clip ni media resma. Se redondea y se
-    muestra siempre como entero."""
-    if valor is None:
+    muestra siempre como entero.
+
+    Trata None y NaN por igual (devuelve 0): una cantidad_entregada aún NULL
+    la lee pandas como NaN, e `int(round(nan))` reventaba con ValueError. Con
+    pd.isna se cubren None, NaN y pd.NA sin que crashee."""
+    if valor is None or pd.isna(valor):
         return 0
     return int(round(float(valor)))
 
@@ -151,6 +251,7 @@ ESQUEMA_SQL = \
             fecha_corte TEXT,
             stock_critico REAL DEFAULT 0,
             valor_saldo REAL DEFAULT 0,
+            valor_unitario REAL DEFAULT 0,
             ubicacion TEXT,
             fecha_venc TEXT,
             lote TEXT,
@@ -252,6 +353,7 @@ ESQUEMA_SQL = \
             cantidad_solicitada REAL NOT NULL,
             cantidad_entregada REAL,
             mensaje_sistema TEXT,
+            valor_movimiento REAL,  -- valor en pesos de lo entregado (valor_unitario * cantidad), fijado al cerrar
             FOREIGN KEY (solicitud_id) REFERENCES solicitudes(id),
             FOREIGN KEY (codigo_producto) REFERENCES productos(codigo)
         );
@@ -311,6 +413,8 @@ def init_db(db_path: str = None) -> None:
         "ALTER TABLE solicitudes ADD COLUMN memo TEXT",
         "ALTER TABLE solicitudes ADD COLUMN tipo_movimiento TEXT",
         "ALTER TABLE solicitudes ADD COLUMN destino TEXT",
+        "ALTER TABLE productos ADD COLUMN valor_unitario REAL DEFAULT 0",
+        "ALTER TABLE solicitud_detalle ADD COLUMN valor_movimiento REAL",
     ]
     for sql in migraciones:
         try:
@@ -386,9 +490,10 @@ def cargar_catalogo(productos, db_path: str = None):
     """
     productos: lista de tuplas (codigo, nombre, unidad, saldo, stock_critico, valor_saldo).
     valor_saldo es el valor contable total de esa línea tal como aparece impreso
-    en la columna 'SALDO VAL.' del listado real — se guarda y se usa directo,
-    sin derivar ni recalcular ningún precio unitario (no existe un precio por
-    unidad confiable: SMC solo informa el valor total de saldo por código).
+    en la columna 'SALDO VAL.' del listado real. De ese total y la cantidad del
+    corte se deriva UNA vez el valor unitario (ver valor_unitario_desde): es el
+    "momento del escaneo", el único punto donde se fija ese precio por unidad,
+    que después se usa fijo para mover el inventario en pesos con cada entrega.
     """
     db_path = db_path or DB_PATH
     from catalogo_real import categoria_por_codigo
@@ -396,11 +501,13 @@ def cargar_catalogo(productos, db_path: str = None):
     conn = get_connection(db_path)
     for producto in productos:
         codigo, nombre, unidad, saldo, stock_critico, valor_saldo = producto
+        unitario = valor_unitario_desde(valor_saldo, saldo)
         conn.execute(
             """
             INSERT INTO productos
-                (codigo, nombre_estandar, unidad_medida, categoria, saldo, stock_critico, valor_saldo, activo)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+                (codigo, nombre_estandar, unidad_medida, categoria, saldo, stock_critico,
+                 valor_saldo, valor_unitario, activo)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
             ON CONFLICT (codigo) DO UPDATE SET
                 nombre_estandar = EXCLUDED.nombre_estandar,
                 unidad_medida = EXCLUDED.unidad_medida,
@@ -408,9 +515,11 @@ def cargar_catalogo(productos, db_path: str = None):
                 saldo = EXCLUDED.saldo,
                 stock_critico = EXCLUDED.stock_critico,
                 valor_saldo = EXCLUDED.valor_saldo,
+                valor_unitario = EXCLUDED.valor_unitario,
                 activo = EXCLUDED.activo
             """,
-            (codigo, nombre, unidad, categoria_por_codigo(codigo), saldo, stock_critico, valor_saldo),
+            (codigo, nombre, unidad, categoria_por_codigo(codigo), saldo, stock_critico,
+             valor_saldo, unitario),
         )
         # el nombre estándar también queda registrado como su propio alias de búsqueda
         texto_norm = normalizar(nombre)
@@ -421,6 +530,7 @@ def cargar_catalogo(productos, db_path: str = None):
         )
     conn.commit()
     conn.close()
+    invalidar_cache_lecturas()
 
 
 # ------------------------------------------------------------ tabla de alias
@@ -440,6 +550,7 @@ def registrar_alias_nuevo(texto_alias, codigo_producto, db_path: str = None):
             (texto_alias, texto_norm, codigo_producto),
         )
         conn.commit()
+        invalidar_cache_lecturas()
     conn.close()
 
 
@@ -515,6 +626,7 @@ def eliminar_alias(id_alias, db_path: str = None):
     conn.execute("DELETE FROM alias_productos WHERE id = ?", (id_alias,))
     conn.commit()
     conn.close()
+    invalidar_cache_lecturas()
     return True, f'Alias "{texto}" eliminado.'
 
 
@@ -556,6 +668,7 @@ def editar_alias(id_alias, nuevo_texto, db_path: str = None):
     )
     conn.commit()
     conn.close()
+    invalidar_cache_lecturas()
     return True, f'Alias actualizado a "{nuevo_texto}".'
 
 
@@ -814,17 +927,25 @@ def buscar_producto(texto_busqueda: str, db_path: str = None, limite: int = 15, 
     en la práctica, porque token_set_ratio ya no infla puntajes artificialmente.
     """
     db_path = db_path or DB_PATH
-    conn = get_connection(db_path)
-    df_alias = pd.read_sql(
-        """
-        SELECT a.texto_alias_normalizado, a.codigo_producto, p.nombre_estandar
-        FROM alias_productos a
-        JOIN productos p ON a.codigo_producto = p.codigo
-        WHERE p.activo = 1
-        """,
-        conn,
-    )
-    conn.close()
+
+    # El índice de alias (una fila por forma de nombrar cada producto) es lo
+    # que se recarga en cada tecla del buscador. Se cachea porque cambia solo
+    # cuando el encargado agrega/edita alias — momento en que se invalida.
+    def _cargar_indice_alias():
+        conn = get_connection(db_path)
+        df = pd.read_sql(
+            """
+            SELECT a.texto_alias_normalizado, a.codigo_producto, p.nombre_estandar
+            FROM alias_productos a
+            JOIN productos p ON a.codigo_producto = p.codigo
+            WHERE p.activo = 1
+            """,
+            conn,
+        )
+        conn.close()
+        return df
+
+    df_alias = _leer_cacheado(("indice_alias", db_path), _cargar_indice_alias)
     if df_alias.empty:
         return []
 
@@ -1398,6 +1519,13 @@ def crear_solicitud(solicitante, supervisor, area_departamento, items, db_path: 
             "No se puede registrar la solicitud — faltan datos obligatorios: " + ", ".join(faltantes)
         )
 
+    # Departamento y oficina se guardan SIEMPRE en MAYÚSCULAS, el mismo
+    # formato que ya usa el comprobante impreso (ver datos_para_impresion).
+    # Así "DIDECO", "dideco" y "Dideco" quedan como un solo valor y no se
+    # parten en categorías distintas al graficar las estadísticas.
+    area_departamento = (area_departamento or "").strip().upper()
+    oficina = (oficina or "").strip().upper()
+
     correlativo = siguiente_correlativo(db_path)
     folio = f"Solicitud-{correlativo}"
     fecha = ahora_chile().strftime("%Y-%m-%d %H:%M")
@@ -1409,7 +1537,7 @@ def crear_solicitud(solicitante, supervisor, area_departamento, items, db_path: 
         "VALUES (?, ?, ?, ?, ?, 'pendiente_firma', ?, ?, ?, ?) "
         "RETURNING id",
         (folio, fecha, solicitante, supervisor, area_departamento, correo_solicitante,
-         correo_supervisor, correlativo, (oficina or "").strip()),
+         correo_supervisor, correlativo, oficina),
     )
     solicitud_id = cur.lastrowid
 
@@ -1521,27 +1649,38 @@ def cerrar_solicitud(folio, db_path: str = None, usuario_operacion=None):
         "SELECT id FROM solicitudes WHERE folio=?", (folio,)
     ).fetchone()[0]
     detalle = conn.execute(
-        "SELECT codigo_producto, cantidad_solicitada, cantidad_entregada "
-        "FROM solicitud_detalle WHERE solicitud_id=?",
+        "SELECT d.codigo_producto, d.cantidad_solicitada, d.cantidad_entregada, "
+        "       COALESCE(p.valor_unitario, 0) "
+        "FROM solicitud_detalle d JOIN productos p ON p.codigo = d.codigo_producto "
+        "WHERE d.solicitud_id=?",
         (solicitud_id,),
     ).fetchall()
 
     alertas = []
-    for codigo, cant_sol, cant_ent in detalle:
+    for codigo, cant_sol, cant_ent, unitario in detalle:
         cantidad_real = formatear_cantidad(cant_ent if cant_ent is not None else cant_sol)
+        valor_movimiento = float(unitario or 0) * cantidad_real
+        # Se descuenta el stock Y el valor en pesos a la vez, manteniendo el
+        # invariante valor_saldo = valor_unitario * saldo: así el valor del
+        # inventario baja solo con cada entrega, usando el valor unitario fijo
+        # del corte (no uno recalculado). El '(saldo - ?)' del SET usa el saldo
+        # ANTERIOR a este UPDATE (así lo evalúan tanto SQLite como Postgres),
+        # por lo que queda valor_unitario * (saldo nuevo).
         conn.execute(
-            "UPDATE productos SET saldo = saldo - ? WHERE codigo = ?",
-            (cantidad_real, codigo),
+            "UPDATE productos SET saldo = saldo - ?, "
+            "valor_saldo = valor_unitario * (saldo - ?) WHERE codigo = ?",
+            (cantidad_real, cantidad_real, codigo),
         )
         conn.execute(
-            "UPDATE solicitud_detalle SET cantidad_entregada=? "
+            "UPDATE solicitud_detalle SET cantidad_entregada=?, valor_movimiento=? "
             "WHERE solicitud_id=? AND codigo_producto=?",
-            (cantidad_real, solicitud_id, codigo),
+            (cantidad_real, valor_movimiento, solicitud_id, codigo),
         )
     conn.commit()
     conn.close()
 
-    for codigo, _, _ in detalle:
+    for fila in detalle:
+        codigo = fila[0]
         tipo, mensaje = evaluar_alerta_stock(codigo, db_path)
         if tipo != "ok":
             alertas.append((codigo, tipo, mensaje))
@@ -1553,6 +1692,7 @@ def cerrar_solicitud(folio, db_path: str = None, usuario_operacion=None):
     )
     conn.commit()
     conn.close()
+    invalidar_cache_lecturas()  # se descontó stock: refrescar inventario cacheado
     return alertas
 
 
@@ -1574,7 +1714,7 @@ def resumen_solicitud(folio, db_path: str = None) -> pd.DataFrame:
         params=(folio,),
     )
     conn.close()
-    return df
+    return _normalizar_columna_mensaje(df)
 
 
 def listar_solicitudes_activas(db_path: str = None, incluir_anteriores=False) -> pd.DataFrame:
@@ -1634,52 +1774,69 @@ def listar_inventario_general(db_path: str = None) -> pd.DataFrame:
     precio unitario, porque no existe uno confiable.
     """
     db_path = db_path or DB_PATH
-    conn = get_connection(db_path)
-    df = pd.read_sql(
-        """
-        SELECT codigo, nombre_estandar, categoria, unidad_medida, saldo, valor_saldo
-        FROM productos
-        WHERE activo = 1
-        ORDER BY categoria, nombre_estandar
-        """,
-        conn,
-    )
-    conn.close()
-    df["saldo"] = df["saldo"].apply(formatear_cantidad)
-    df["valor_saldo"] = df["valor_saldo"].round(0).astype(int)
-    return df
+
+    def _cargar():
+        conn = get_connection(db_path)
+        df = pd.read_sql(
+            """
+            SELECT codigo, nombre_estandar, categoria, unidad_medida, saldo, valor_saldo
+            FROM productos
+            WHERE activo = 1
+            ORDER BY categoria, nombre_estandar
+            """,
+            conn,
+        )
+        conn.close()
+        df["saldo"] = df["saldo"].apply(formatear_cantidad)
+        df["valor_saldo"] = df["valor_saldo"].round(0).astype(int)
+        return df
+
+    return _leer_cacheado(("inventario_general", db_path), _cargar)
 
 
 def valor_total_inventario(db_path: str = None) -> int:
     """Valor total de los bienes en bodega: suma de 'SALDO VAL.' del último corte importado."""
     db_path = db_path or DB_PATH
-    conn = get_connection(db_path)
-    total = conn.execute(
-        "SELECT COALESCE(SUM(valor_saldo), 0) FROM productos WHERE activo = 1"
-    ).fetchone()[0]
-    conn.close()
-    return int(round(total))
+
+    def _cargar():
+        conn = get_connection(db_path)
+        # Se suma en Python (doble precisión) en vez de SUM() en la base: en
+        # Postgres valor_saldo es REAL (precisión simple) y SUM() sobre un
+        # total de decenas de millones pierde algunos pesos. Cada valor por
+        # producto sí es exacto, así que sumarlos en Python da el total exacto.
+        valores = conn.execute(
+            "SELECT valor_saldo FROM productos WHERE activo = 1"
+        ).fetchall()
+        conn.close()
+        total = sum(float(v[0]) for v in valores if v[0] is not None)
+        return int(round(total))
+
+    return _leer_cacheado(("valor_total_inventario", db_path), _cargar)
 
 
 def listar_stock_critico(db_path: str = None) -> pd.DataFrame:
     """Insumos agotados o bajo su stock crítico — los que requieren compra
     o renovación más urgente."""
     db_path = db_path or DB_PATH
-    conn = get_connection(db_path)
-    df = pd.read_sql(
-        """
-        SELECT codigo, nombre_estandar, categoria, unidad_medida, saldo, stock_critico,
-               CASE WHEN saldo <= 0 THEN 'AGOTADO' ELSE 'BAJO CRÍTICO' END AS urgencia
-        FROM productos
-        WHERE activo = 1 AND (saldo <= 0 OR (stock_critico > 0 AND saldo < stock_critico))
-        ORDER BY (saldo <= 0) DESC, saldo ASC
-        """,
-        conn,
-    )
-    conn.close()
-    for col in ("saldo", "stock_critico"):
-        df[col] = df[col].apply(formatear_cantidad)
-    return df
+
+    def _cargar():
+        conn = get_connection(db_path)
+        df = pd.read_sql(
+            """
+            SELECT codigo, nombre_estandar, categoria, unidad_medida, saldo, stock_critico,
+                   CASE WHEN saldo <= 0 THEN 'AGOTADO' ELSE 'BAJO CRÍTICO' END AS urgencia
+            FROM productos
+            WHERE activo = 1 AND (saldo <= 0 OR (stock_critico > 0 AND saldo < stock_critico))
+            ORDER BY (saldo <= 0) DESC, saldo ASC
+            """,
+            conn,
+        )
+        conn.close()
+        for col in ("saldo", "stock_critico"):
+            df[col] = df[col].apply(formatear_cantidad)
+        return df
+
+    return _leer_cacheado(("stock_critico", db_path), _cargar)
 
 
 def historial_periodos(db_path: str = None):
@@ -1716,7 +1873,7 @@ def historial_por_periodo(periodo: str, db_path: str = None) -> pd.DataFrame:
     conn.close()
     for col in ("cantidad_solicitada", "cantidad_entregada"):
         df[col] = df[col].apply(formatear_cantidad)
-    return df
+    return _normalizar_columna_mensaje(df)
 
 
 HORA_CIERRE_JORNADA = 19  # a las 19:00 se cierra la jornada de bodega
@@ -1779,25 +1936,37 @@ def estadisticas_consumo(desde=None, hasta=None, solo_cerradas=True, db_path: st
     necesidad.
 
     Se usa la cantidad entregada cuando existe (lo que realmente salió de
-    bodega) y, si no, la solicitada. No se valoriza en pesos: no existe un
-    precio unitario confiable por código (SMC solo informa el valor total
-    de saldo, no un precio por unidad), así que estas cifras son solo de
-    unidades y solicitudes.
+    bodega) y, si no, la solicitada. Además de unidades y solicitudes se
+    calcula el VALOR en pesos de lo consumido: se usa valor_movimiento (el
+    valor fijado al cerrar cada línea) y, para comprobantes cerrados antes de
+    que existiera esa columna, se estima con valor_unitario * cantidad.
+
+    Departamento y oficina se agrupan en MAYÚSCULAS (UPPER) para que las
+    variantes de tipeo del mismo nombre —"DIDECO", "dideco", "Dideco"— caigan
+    en un solo grupo. Las solicitudes nuevas ya se guardan en mayúsculas (ver
+    crear_solicitud); el UPPER acá cubre además los datos históricos mixtos.
     """
     db_path = db_path or DB_PATH
     filtro_fecha, params = _filtro_fechas_sql(desde, hasta)
     filtro_estado = "s.estado = 'cerrada'" if solo_cerradas else "s.estado != 'anulada'"
     base_where = f"WHERE {filtro_estado}{filtro_fecha}"
     cantidad = "COALESCE(d.cantidad_entregada, d.cantidad_solicitada)"
+    # Valor en pesos de cada línea: el fijado al cerrar, o estimado si es viejo.
+    valor = ("COALESCE(d.valor_movimiento, "
+             "COALESCE(p.valor_unitario, 0) * COALESCE(d.cantidad_entregada, d.cantidad_solicitada))")
 
     conn = get_connection(db_path)
 
-    def _consulta(campo, alias):
+    def _consulta(campo, alias, mayus=False):
+        etiqueta = f"COALESCE(NULLIF(TRIM({campo}), ''), '(sin dato)')"
+        if mayus:
+            etiqueta = f"UPPER({etiqueta})"
         return pd.read_sql(
             f"""
-            SELECT COALESCE(NULLIF(TRIM({campo}), ''), '(sin dato)') AS {alias},
+            SELECT {etiqueta} AS {alias},
                    COUNT(DISTINCT s.id) AS solicitudes,
-                   SUM({cantidad}) AS unidades
+                   SUM({cantidad}) AS unidades,
+                   SUM({valor}) AS valor
             FROM solicitudes s
             JOIN solicitud_detalle d ON d.solicitud_id = s.id
             JOIN productos p ON p.codigo = d.codigo_producto
@@ -1808,15 +1977,16 @@ def estadisticas_consumo(desde=None, hasta=None, solo_cerradas=True, db_path: st
             conn, params=params,
         )
 
-    por_departamento = _consulta("s.area_departamento", "departamento")
-    por_oficina = _consulta("s.oficina", "oficina")
+    por_departamento = _consulta("s.area_departamento", "departamento", mayus=True)
+    por_oficina = _consulta("s.oficina", "oficina", mayus=True)
     por_solicitante = _consulta("s.solicitante", "solicitante")
 
     por_producto = pd.read_sql(
         f"""
         SELECT p.nombre_estandar AS producto, p.categoria,
                COUNT(DISTINCT s.id) AS veces_pedido,
-               SUM({cantidad}) AS unidades
+               SUM({cantidad}) AS unidades,
+               SUM({valor}) AS valor
         FROM solicitudes s
         JOIN solicitud_detalle d ON d.solicitud_id = s.id
         JOIN productos p ON p.codigo = d.codigo_producto
@@ -1830,7 +2000,8 @@ def estadisticas_consumo(desde=None, hasta=None, solo_cerradas=True, db_path: st
     por_categoria = pd.read_sql(
         f"""
         SELECT COALESCE(p.categoria, '(sin categoría)') AS categoria,
-               SUM({cantidad}) AS unidades
+               SUM({cantidad}) AS unidades,
+               SUM({valor}) AS valor
         FROM solicitudes s
         JOIN solicitud_detalle d ON d.solicitud_id = s.id
         JOIN productos p ON p.codigo = d.codigo_producto
@@ -1845,7 +2016,8 @@ def estadisticas_consumo(desde=None, hasta=None, solo_cerradas=True, db_path: st
         f"""
         SELECT substr(s.fecha_solicitud, 1, 7) AS mes,
                COUNT(DISTINCT s.id) AS solicitudes,
-               SUM({cantidad}) AS unidades
+               SUM({cantidad}) AS unidades,
+               SUM({valor}) AS valor
         FROM solicitudes s
         JOIN solicitud_detalle d ON d.solicitud_id = s.id
         JOIN productos p ON p.codigo = d.codigo_producto
@@ -1861,6 +2033,8 @@ def estadisticas_consumo(desde=None, hasta=None, solo_cerradas=True, db_path: st
                por_categoria, por_mes):
         if not df.empty and "unidades" in df:
             df["unidades"] = df["unidades"].fillna(0).apply(formatear_cantidad)
+        if not df.empty and "valor" in df:
+            df["valor"] = df["valor"].fillna(0).round(0).astype("int64")
 
     return {
         "departamento": por_departamento, "oficina": por_oficina,
@@ -2020,7 +2194,7 @@ def detalle_folio(folio: str, db_path: str = None) -> pd.DataFrame:
     conn.close()
     for col in ("cantidad_solicitada", "cantidad_entregada"):
         df[col] = df[col].apply(formatear_cantidad)
-    return df
+    return _normalizar_columna_mensaje(df)
 
 
 def solicitudes_de(solicitante: str, db_path: str = None) -> pd.DataFrame:
@@ -2064,25 +2238,37 @@ def solicitudes_de_correo(correo: str, db_path: str = None) -> pd.DataFrame:
 
 def actualizar_valores_catalogo(db_path: str = None):
     """
-    Recalcula valor_saldo de cada producto a partir de catalogo_real.py
-    SIN tocar saldo, stock_critico, ni nada más. Existe porque una base
-    creada antes de que se agregara la valorización (ver migraciones en
-    init_db) queda con valor_saldo en 0 — cargar_catalogo() no se vuelve a
-    correr sobre una base que ya existía, así que el valor nunca se
-    cargaba. Es seguro llamarla siempre al arrancar la app: es idempotente
-    y no descuadra el stock ya movido.
+    Recalcula valor_saldo y valor_unitario de cada producto a partir de
+    catalogo_real.py SIN tocar saldo, stock_critico, ni nada más. Existe
+    porque una base creada antes de que se agregara la valorización (ver
+    migraciones en init_db) queda con valor_saldo/valor_unitario en 0 —
+    cargar_catalogo() no se vuelve a correr sobre una base que ya existía, así
+    que esos valores nunca se cargaban. Es seguro llamarla siempre al arrancar
+    la app: es idempotente y no descuadra el stock ya movido.
+
+    El valor_unitario se deriva del corte original (valor_saldo / saldo del
+    catálogo, NO del saldo ya movido en la base), que es justamente lo que
+    exige la regla: el unitario se fija en el escaneo y no se recalcula con el
+    stock consumido.
     """
     db_path = db_path or DB_PATH
     from catalogo_real import PRODUCTOS
 
     conn = get_connection(db_path)
-    for codigo, _nombre, _unidad, _saldo_original, _stock_critico, valor_saldo in PRODUCTOS:
+    for codigo, _nombre, _unidad, saldo_original, _stock_critico, valor_saldo in PRODUCTOS:
+        unitario = valor_unitario_desde(valor_saldo, saldo_original)
+        # valor_saldo se deja como valor_unitario * saldo ACTUAL (no el total
+        # original): así queda coherente con el stock real: en una base recién
+        # cargada el saldo es el original y da el total del corte; en una que
+        # ya movió stock, refleja lo que queda. El unitario sí sale del corte
+        # original (valor / saldo_original), fijo.
         conn.execute(
-            "UPDATE productos SET valor_saldo = ? WHERE codigo = ?",
-            (valor_saldo, codigo),
+            "UPDATE productos SET valor_unitario = ?, valor_saldo = ? * saldo WHERE codigo = ?",
+            (unitario, unitario, codigo),
         )
     conn.commit()
     conn.close()
+    invalidar_cache_lecturas()
 
 
 def guardar_config(clave, valor, db_path: str = None):
@@ -2379,8 +2565,18 @@ def importar_saldos_smc(ruta_archivo, db_path: str = None, fecha_corte=None):
             campos.append("stock_critico=?")
             valores.append(critico_nuevo)
         if valor_nuevo is not None:
+            # El archivo trae el valor total (SALDO VAL.): es un corte nuevo
+            # CON pesos, así que este es el "momento del escaneo" donde SÍ se
+            # refija el valor unitario = total / cantidad de este corte.
             campos.append("valor_saldo=?")
             valores.append(valor_nuevo)
+            campos.append("valor_unitario=?")
+            valores.append(valor_unitario_desde(valor_nuevo, saldo_nuevo))
+        else:
+            # Sin valor en el archivo: se mantiene el unitario del corte previo
+            # y se reajusta el total = unitario * nuevo_saldo (invariante).
+            campos.append("valor_saldo = valor_unitario * ?")
+            valores.append(saldo_nuevo)
         valores.append(codigo)
         conn.execute(f"UPDATE productos SET {', '.join(campos)} WHERE codigo=?", valores)
         actualizados += 1
@@ -2388,6 +2584,7 @@ def importar_saldos_smc(ruta_archivo, db_path: str = None, fecha_corte=None):
     conn.commit()
     conn.close()
     guardar_config("ultima_importacion_smc", fecha, db_path)
+    invalidar_cache_lecturas()  # cambió el saldo/valor de productos
     return pd.DataFrame(diferencias), actualizados
 
 
@@ -2649,15 +2846,22 @@ def aplicar_saldos_revisados(df: pd.DataFrame, db_path: str = None, fecha_corte=
                 "observacion": ("Ingreso o ajuste registrado en SMC" if delta > 0
                                 else "Salida registrada fuera de este sistema"),
             })
+        # El escaneo OCR trae solo la cantidad, no el valor en pesos, así que
+        # NO se recalcula el valor unitario (queda el del corte, como debe).
+        # Pero sí se reajusta valor_saldo = valor_unitario * nuevo_saldo para
+        # mantener el invariante: el valor en pesos del inventario acompaña a
+        # la cantidad reescaneada, con el unitario fijo.
         conn.execute(
-            "UPDATE productos SET saldo=?, saldo_importado=?, fecha_corte=? WHERE codigo=?",
-            (saldo_nuevo, saldo_nuevo, fecha, codigo),
+            "UPDATE productos SET saldo=?, saldo_importado=?, fecha_corte=?, "
+            "valor_saldo = valor_unitario * ? WHERE codigo=?",
+            (saldo_nuevo, saldo_nuevo, fecha, saldo_nuevo, codigo),
         )
         actualizados += 1
 
     conn.commit()
     conn.close()
     guardar_config("ultima_importacion_smc", fecha, db_path)
+    invalidar_cache_lecturas()  # cambió el saldo/valor de productos
     return pd.DataFrame(diferencias), actualizados
 
 
@@ -2773,6 +2977,7 @@ def exportar_historial_excel(ruta: str = None, carpeta_pdf: str = "formularios",
                p.codigo, p.nombre_estandar AS producto, p.categoria,
                p.unidad_medida AS unidad,
                d.cantidad_solicitada AS solicitado, d.cantidad_entregada AS entregado,
+               p.valor_unitario AS valor_unitario, d.valor_movimiento AS valor_entregado,
                d.mensaje_sistema AS observacion
         FROM solicitudes s
         JOIN solicitud_detalle d ON d.solicitud_id = s.id
@@ -2783,6 +2988,15 @@ def exportar_historial_excel(ruta: str = None, carpeta_pdf: str = "formularios",
         conn,
     )
     conn.close()
+
+    # Valor en pesos de cada línea entregada. valor_movimiento se fija al
+    # cerrar; para comprobantes cerrados antes de existir esta columna (NULL),
+    # se estima con el valor unitario actual por cantidad, para no dejar la
+    # celda vacía en el histórico.
+    if not detalle.empty:
+        est = (detalle["valor_unitario"].fillna(0) * detalle["entregado"].fillna(0)).round(0)
+        detalle["valor_entregado"] = detalle["valor_entregado"].fillna(est).round(0)
+        detalle["valor_unitario"] = detalle["valor_unitario"].fillna(0).round(0)
 
     def _nombre_si_existe(prefijo, correlativo):
         nombre = f"{prefijo}_{correlativo}.pdf"
