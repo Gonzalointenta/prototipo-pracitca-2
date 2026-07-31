@@ -1,0 +1,49 @@
+name: Despertar la web (mañana y mediodía)
+
+# Despierta la web de solicitudes dos veces por día —~6 AM y ~mediodía hora de
+# Chile— para cubrir todo el horario laboral de la municipalidad. Alcanza con
+# dos porque Streamlit Community Cloud recién duerme una app tras 12 HORAS sin
+# tráfico: el despertar de las 6 la deja arriba hasta la tarde, y el del
+# mediodía extiende la cobertura hasta pasada la medianoche, así que aunque un
+# día no entre nadie no se duerme dentro de la jornada. De noche se deja dormir
+# sola hasta el otro día.
+#
+# Un simple ping HTTP no despierta la app (devuelve 200 pero el proceso Python
+# no arranca), así que se usa un navegador headless (Playwright) que sí la
+# levanta. Ver .github/scripts/despertar_web.py.
+
+on:
+  # Horario en UTC (GitHub Actions no maneja zonas horarias ni horario de
+  # verano). Chile es UTC-4 en invierno y UTC-3 en verano:
+  #   09:00 UTC = 06:00 verano / 05:00 invierno  (despertar de la mañana)
+  #   15:00 UTC = 12:00 verano / 11:00 invierno  (despertar del mediodía)
+  schedule:
+    - cron: "0 9 * * *"
+    - cron: "0 15 * * *"
+  # Permite dispararlo a mano desde la pestaña Actions para probar.
+  workflow_dispatch: {}
+
+jobs:
+  despertar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@v4
+
+      - name: Preparar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar Playwright + Chromium
+        run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Despertar la web
+        env:
+          # Si algún día cambia la URL, definí la variable de repositorio
+          # STREAMLIT_APP_URL (Settings → Secrets and variables → Actions →
+          # Variables) y se usa esa; si no, cae al valor por defecto del script.
+          STREAMLIT_APP_URL: ${{ vars.STREAMLIT_APP_URL }}
+        run: python .github/scripts/despertar_web.py
