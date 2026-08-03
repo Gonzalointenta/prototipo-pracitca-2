@@ -1,12 +1,12 @@
-name: Despertar la web (mañana y mediodía)
+name: Despertar la web (mañana y mediodía, L a V)
 
 # Despierta la web de solicitudes dos veces por día —~6 AM y ~mediodía hora de
-# Chile— para cubrir todo el horario laboral de la municipalidad. Alcanza con
-# dos porque Streamlit Community Cloud recién duerme una app tras 12 HORAS sin
-# tráfico: el despertar de las 6 la deja arriba hasta la tarde, y el del
-# mediodía extiende la cobertura hasta pasada la medianoche, así que aunque un
-# día no entre nadie no se duerme dentro de la jornada. De noche se deja dormir
-# sola hasta el otro día.
+# Chile—, SOLO de lunes a viernes, para cubrir el horario laboral de la
+# municipalidad. Los fines de semana no se toca: se deja dormir. Alcanza con
+# dos despertadas por día porque Streamlit Community Cloud recién duerme una
+# app tras 12 HORAS sin tráfico: el despertar de las 6 la deja arriba hasta la
+# tarde, y el del mediodía extiende la cobertura hasta pasada la medianoche,
+# así que aunque un día no entre nadie no se duerme dentro de la jornada.
 #
 # Un simple ping HTTP no despierta la app (devuelve 200 pero el proceso Python
 # no arranca), así que se usa un navegador headless (Playwright) que sí la
@@ -17,9 +17,12 @@ on:
   # verano). Chile es UTC-4 en invierno y UTC-3 en verano:
   #   09:00 UTC = 06:00 verano / 05:00 invierno  (despertar de la mañana)
   #   15:00 UTC = 12:00 verano / 11:00 invierno  (despertar del mediodía)
+  # El "1-5" al final = lunes a viernes (0=domingo … 6=sábado). Como estas
+  # horas UTC caen el mismo día calendario que en Chile, L-V en UTC coincide
+  # con L-V en Chile.
   schedule:
-    - cron: "0 9 * * *"
-    - cron: "0 15 * * *"
+    - cron: "0 9 * * 1-5"
+    - cron: "0 15 * * 1-5"
   # Permite dispararlo a mano desde la pestaña Actions para probar.
   workflow_dispatch: {}
 
@@ -47,3 +50,4 @@ jobs:
           # Variables) y se usa esa; si no, cae al valor por defecto del script.
           STREAMLIT_APP_URL: ${{ vars.STREAMLIT_APP_URL }}
         run: python .github/scripts/despertar_web.py
+
