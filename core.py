@@ -1668,8 +1668,10 @@ def cambiar_rol(correo, nuevo_rol, db_path: str = None):
       - roles válidos: 'admin', 'encargado', 'solicitante'.
       - para dar acceso de encargado o admin, el correo tiene que estar en la
         nómina autorizada (si no, primero hay que autorizarlo).
-      - NO se puede dejar el sistema sin ningún admin: si se intenta bajar de
-        rol al último admin, se rechaza (quedaría nadie que pueda gestionar).
+      - un administrador NO le puede quitar/cambiar el rol a otro
+        administrador: los admin son pares y no se degradan entre sí desde la
+        interfaz (a un encargado sí se le puede cambiar). Si alguna vez hiciera
+        falta sacar un admin, se hace directo en la base de datos.
     Devuelve (ok, mensaje).
     """
     db_path = db_path or DB_PATH
@@ -1684,13 +1686,15 @@ def cambiar_rol(correo, nuevo_rol, db_path: str = None):
     if rol_actual == nuevo_rol:
         return False, f"La cuenta ya es {ETIQUETAS_ROL.get(nuevo_rol, nuevo_rol)}."
 
+    # Los administradores no se tocan entre sí: una cuenta que ya es admin no
+    # puede ser modificada desde la interfaz (ni degradada ni cambiada).
+    if rol_actual == "admin":
+        return False, ("No se puede cambiar el rol de un administrador. Entre administradores "
+                       "no se quitan permisos.")
+
     if nuevo_rol in ROLES_CON_ACCESO_ENCARGADO and not correo_autorizado(correo, db_path):
         return False, ("Ese correo no está en la nómina autorizada. Autorícelo primero "
                        "en 'Autorizar un correo' y después asígnele el rol.")
-    # No dejar el sistema sin ningún admin.
-    if rol_actual == "admin" and nuevo_rol != "admin" and contar_admins(db_path) <= 1:
-        return False, ("No se puede: es el único administrador del sistema. Nombre a otra "
-                       "persona administradora antes de quitarle el rol a esta.")
 
     conn = get_connection(db_path)
     conn.execute("UPDATE personas_registradas SET rol=? WHERE correo=?", (nuevo_rol, correo))

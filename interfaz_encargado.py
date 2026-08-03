@@ -1078,10 +1078,7 @@ def panel_gestion_accesos():
             st.rerun()
 
     st.divider()
-    st.info(
-        "Abajo: personas **ya registradas**. Podés cambiarles el rol directamente. (Alguien "
-        "aparece acá recién cuando se registró en la web con un correo autorizado.)"
-    )
+    st.markdown("**Personas registradas**")
 
     df = core.listar_personas_registradas()
     if df.empty:
