@@ -34,7 +34,12 @@ style = "normal"
 
 [theme]
 base = "light"
-backgroundColor = "#FFFFFF"
+# Fondo del área central: NO blanco puro (#FFFFFF cansa la vista), sino un
+# blanco con un toque de menta derivado del celeste #7CF2D1, para que todo el
+# modo claro tenga la misma tonalidad y descanse más. El sidebar y los inputs
+# siguen en el celeste más marcado (secondaryBackgroundColor). SOLO la web usa
+# este fondo; el .exe (config.toml de la raíz) queda con su blanco original.
+backgroundColor = "#EAFBF6"
 secondaryBackgroundColor = "#7CF2D1"
 textColor = "#000000"
 primaryColor = "#1B4F72"
