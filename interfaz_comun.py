@@ -158,7 +158,11 @@ def cargar_identidad_sesion(db_path):
         else:
             st.session_state.correo_registrado = None
 
-    es_encargado = bool(identidad_sesion) and identidad_sesion.get("rol") == "encargado"
+    # es_encargado = puede entrar a la app de encargado (admin o encargado).
+    # El detalle admin/encargado se distingue con identidad_sesion["rol"]
+    # donde haga falta (ej. el panel de gestión de roles, solo para admin).
+    es_encargado = (bool(identidad_sesion)
+                    and identidad_sesion.get("rol") in core.ROLES_CON_ACCESO_ENCARGADO)
 
     return identidad_sesion, es_encargado
 
@@ -174,33 +178,56 @@ def cerrar_sesion():
 
 
 def mostrar_barra_sesion(identidad_sesion, es_encargado):
-    """Caption de quien esta identificado + boton de cerrar sesion, arriba
-    del titulo."""
+    """Caption de quien está identificado, arriba del título. El botón de
+    cerrar sesión vive ahora en la barra lateral (ver mostrar_sidebar_cuenta)."""
     if identidad_sesion:
+        rol_texto = "Encargado de bodega" if es_encargado else "Solicitante"
         _, col_sesion = st.columns([4, 1])
-        with col_sesion:
-            rol_texto = "Encargado de bodega" if es_encargado else "Solicitante"
-            st.caption(f"{identidad_sesion['nombre']}  \n{rol_texto}")
-            if st.button("Cerrar sesión", width='stretch'):
-                cerrar_sesion()
-                st.rerun()
+        col_sesion.caption(f"{identidad_sesion['nombre']}  \n{rol_texto}")
         st.divider()
 
 
 def mostrar_sidebar_cuenta(identidad_sesion):
-    """Panel 'Mi cuenta' en la barra lateral (correo + cambiar contraseña)."""
-    if identidad_sesion:
-        with st.sidebar:
-            st.subheader("Mi cuenta")
-            st.caption(identidad_sesion["correo"])
-            with st.expander("Cambiar contraseña"):
-                actual = st.text_input("Contraseña actual", type="password", key="pass_actual")
-                nueva1 = st.text_input("Nueva contraseña", type="password", key="pass_nueva1")
-                nueva2 = st.text_input("Repetir nueva contraseña", type="password", key="pass_nueva2")
-                if st.button("Actualizar contraseña"):
-                    ok_pass, msg_pass = core.cambiar_password(
-                        identidad_sesion["correo"], actual, nueva1, nueva2)
-                    (st.success if ok_pass else st.error)(msg_pass)
+    """Panel 'Mi cuenta' en la barra lateral: datos de la cuenta, cambio de
+    contraseña y cierre de sesión (mismo lugar en la web y en el escritorio)."""
+    if not identidad_sesion:
+        return
+    with st.sidebar:
+        st.subheader("Mi cuenta")
+        st.caption(identidad_sesion["correo"])
+
+        with st.expander("Editar mis datos"):
+            nombre = st.text_input(
+                "Nombre completo", value=identidad_sesion.get("nombre") or "", key="ed_nombre")
+            area = st.text_input(
+                "Área / Departamento", value=identidad_sesion.get("area_departamento") or "",
+                key="ed_area")
+            supervisor = st.text_input(
+                "Supervisor / jefatura", value=identidad_sesion.get("nombre_supervisor") or "",
+                key="ed_sup")
+            st.caption("La oficina no se guarda en la cuenta: se elige en cada solicitud.")
+            if st.button("Guardar datos", key="btn_guardar_datos"):
+                ok_d, msg_d = core.actualizar_datos_persona(
+                    identidad_sesion["correo"], nombre, area, supervisor)
+                if ok_d:
+                    st.success(msg_d)
+                    st.rerun()
+                else:
+                    st.error(msg_d)
+
+        with st.expander("Cambiar contraseña"):
+            actual = st.text_input("Contraseña actual", type="password", key="pass_actual")
+            nueva1 = st.text_input("Nueva contraseña", type="password", key="pass_nueva1")
+            nueva2 = st.text_input("Repetir nueva contraseña", type="password", key="pass_nueva2")
+            if st.button("Actualizar contraseña"):
+                ok_pass, msg_pass = core.cambiar_password(
+                    identidad_sesion["correo"], actual, nueva1, nueva2)
+                (st.success if ok_pass else st.error)(msg_pass)
+
+        st.divider()
+        if st.button("Cerrar sesión", width='stretch', key="btn_logout_sidebar"):
+            cerrar_sesion()
+            st.rerun()
 
 
 # =====================================================================
@@ -508,7 +535,12 @@ def panel_acceso():
             if not ok:
                 st.error(mensaje)
                 return
-            core.registrar_persona(correo_r, nombre, area, nombre_supervisor, password1)
+            # Si el admin autorizó este correo con un rol pre-asignado
+            # (admin/encargado), la cuenta toma ese rol al registrarse; si no,
+            # queda como solicitante normal.
+            rol_inicial = core.rol_preasignado(correo_r)
+            core.registrar_persona(correo_r, nombre, area, nombre_supervisor, password1,
+                                   rol=rol_inicial)
             st.session_state.correo_registrado = correo_r
             st.success("Registro completado.")
             st.rerun()

@@ -1044,6 +1044,85 @@ def panel_correos_autorizados():
                     st.rerun()
 
 
+def panel_gestion_accesos():
+    """Solo para admin (creador y supervisor): dar/quitar el rol de encargado
+    o administrador a las cuentas ya registradas."""
+    st.subheader("Gestionar accesos")
+    st.caption(
+        "Acá se define quién puede entrar a esta app de encargado. Esta pestaña la ven "
+        "solo los administradores.\n\n"
+        "• **Administrador** — usa la app y además puede gestionar estos accesos (creador y "
+        "supervisor).\n"
+        "• **Encargado** — usa la app (solicitudes, inventario, etc.) pero no gestiona accesos.\n"
+        "• **Solicitante** — solo hace pedidos desde la web."
+    )
+    # ------ autorizar un correo nuevo YA con un rol (la persona se registra sola)
+    st.markdown("**Dar acceso a alguien nuevo (se registra después con su propia contraseña)**")
+    st.caption(
+        "Autoriza el correo con el rol que tendrá. La persona luego entra a la web, se "
+        "registra de cero (elige su propia contraseña) y queda directamente con ese rol — "
+        "sin que vos tengas que saber su clave ni ascenderla a mano."
+    )
+    ca, cb, cc = st.columns([3, 2, 2])
+    correo_nuevo = ca.text_input("Correo", key="ga_correo", placeholder="nombre@mtraiguen.cl")
+    nombre_ref = cb.text_input("Nombre (referencia)", key="ga_nombre")
+    rol_nuevo = cc.selectbox(
+        "Rol al registrarse", ["encargado", "admin", "solicitante"],
+        format_func=lambda r: core.ETIQUETAS_ROL[r], key="ga_rol_nuevo",
+    )
+    if st.button("Autorizar con ese rol", type="primary", key="ga_autorizar"):
+        ok, msg = core.autorizar_correo(
+            correo_nuevo, nombre_ref, "", "admin", rol_al_registrar=rol_nuevo)
+        (st.success if ok else st.error)(msg)
+        if ok:
+            st.rerun()
+
+    st.divider()
+    st.info(
+        "Abajo: personas **ya registradas**. Podés cambiarles el rol directamente. (Alguien "
+        "aparece acá recién cuando se registró en la web con un correo autorizado.)"
+    )
+
+    df = core.listar_personas_registradas()
+    if df.empty:
+        st.warning("Todavía no hay ninguna persona registrada.")
+        return
+
+    df_vista = df.copy()
+    df_vista["rol"] = df_vista["rol"].map(core.ETIQUETAS_ROL).fillna(df_vista["rol"])
+    st.dataframe(
+        df_vista.rename(columns={"correo": "Correo", "nombre": "Nombre",
+                                 "area_departamento": "Área", "rol": "Rol"}),
+        width='stretch', hide_index=True,
+    )
+
+    st.markdown("**Cambiar el rol de una persona**")
+    opciones = {
+        f"{fila.nombre} · {fila.correo} · ({core.ETIQUETAS_ROL.get(fila.rol, fila.rol)})": fila.correo
+        for fila in df.itertuples()
+    }
+    elegido = st.selectbox("Persona", [""] + list(opciones.keys()), key="rol_persona_sel")
+    if not elegido:
+        return
+    correo_sel = opciones[elegido]
+
+    nuevo_rol = st.radio(
+        "Nuevo rol", ["encargado", "admin", "solicitante"],
+        format_func=lambda r: core.ETIQUETAS_ROL[r], horizontal=True, key="rol_nuevo_sel",
+    )
+    st.caption(
+        {"admin": "Podrá usar la app y también gestionar accesos.",
+         "encargado": "Podrá usar la app, pero no gestionar accesos.",
+         "solicitante": "Solo podrá hacer pedidos desde la web (le saca el acceso de encargado)."
+         }[nuevo_rol]
+    )
+    if st.button("Aplicar rol", type="primary"):
+        ok, msg = core.cambiar_rol(correo_sel, nuevo_rol)
+        (st.success if ok else st.error)(msg)
+        if ok:
+            st.rerun()
+
+
 def panel_sync_smc():
     st.subheader("Sincronización con SMC")
     st.caption(

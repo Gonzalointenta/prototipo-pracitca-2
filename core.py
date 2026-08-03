@@ -287,7 +287,8 @@ ESQUEMA_SQL = \
             area_departamento TEXT,
             estado TEXT DEFAULT 'autorizado',  -- autorizado | bloqueado
             fecha_alta TEXT NOT NULL,
-            dado_de_alta_por TEXT
+            dado_de_alta_por TEXT,
+            rol_al_registrar TEXT  -- rol que tomará la cuenta al registrarse (admin/encargado); NULL = solicitante
         );
 
         CREATE TABLE IF NOT EXISTS personas_registradas (
@@ -415,6 +416,7 @@ def init_db(db_path: str = None) -> None:
         "ALTER TABLE solicitudes ADD COLUMN destino TEXT",
         "ALTER TABLE productos ADD COLUMN valor_unitario REAL DEFAULT 0",
         "ALTER TABLE solicitud_detalle ADD COLUMN valor_movimiento REAL",
+        "ALTER TABLE correos_autorizados ADD COLUMN rol_al_registrar TEXT",
     ]
     for sql in migraciones:
         try:
@@ -1176,30 +1178,65 @@ CORRELATIVO_INICIAL = 2900  # el talonario físico va en 2798 (mayo); se parte e
 
 
 def autorizar_correo(correo, nombre_referencia="", area_departamento="", dado_de_alta_por="encargado",
-                     db_path: str = None):
+                     db_path: str = None, rol_al_registrar=None):
+    """
+    Autoriza un correo a registrarse. rol_al_registrar (opcional): si se pasa
+    'admin' o 'encargado', la cuenta tomará ese rol al momento de registrarse
+    (así se puede dar acceso de encargado/admin a alguien sin conocer su
+    contraseña: se autoriza con el rol y la persona se registra de cero). Si
+    es None, se registra como solicitante normal.
+    """
     db_path = db_path or DB_PATH
     correo = (correo or "").strip().lower()
     if not correo:
         return False, "El correo no puede estar vacío."
     if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", correo):
         return False, f'"{correo}" no tiene formato de correo válido.'
+    if rol_al_registrar not in (None, "admin", "encargado", "solicitante"):
+        return False, "Rol a asignar inválido."
+    if rol_al_registrar == "solicitante":
+        rol_al_registrar = None  # es el rol por defecto: no hace falta guardarlo
     fecha = ahora_chile().strftime("%Y-%m-%d %H:%M")
     conn = get_connection(db_path)
     conn.execute(
         "INSERT INTO correos_autorizados "
-        "(correo, nombre_referencia, area_departamento, estado, fecha_alta, dado_de_alta_por) "
-        "VALUES (?, ?, ?, 'autorizado', ?, ?) "
+        "(correo, nombre_referencia, area_departamento, estado, fecha_alta, dado_de_alta_por, rol_al_registrar) "
+        "VALUES (?, ?, ?, 'autorizado', ?, ?, ?) "
         "ON CONFLICT (correo) DO UPDATE SET "
         "nombre_referencia = EXCLUDED.nombre_referencia, "
         "area_departamento = EXCLUDED.area_departamento, "
         "estado = EXCLUDED.estado, "
         "fecha_alta = EXCLUDED.fecha_alta, "
-        "dado_de_alta_por = EXCLUDED.dado_de_alta_por",
-        (correo, nombre_referencia.strip(), area_departamento.strip(), fecha, dado_de_alta_por),
+        "dado_de_alta_por = EXCLUDED.dado_de_alta_por, "
+        "rol_al_registrar = EXCLUDED.rol_al_registrar",
+        (correo, nombre_referencia.strip(), area_departamento.strip(), fecha, dado_de_alta_por,
+         rol_al_registrar),
     )
     conn.commit()
     conn.close()
+    if rol_al_registrar in ("admin", "encargado"):
+        etiqueta = ETIQUETAS_ROL.get(rol_al_registrar, rol_al_registrar)
+        return True, (f"{correo} quedó autorizado. Al registrarse quedará con rol "
+                      f"'{etiqueta}'.")
     return True, f"{correo} quedó autorizado para hacer solicitudes."
+
+
+def rol_preasignado(correo, db_path: str = None) -> str:
+    """
+    Rol que debe tomar una cuenta al registrarse, según lo dejó definido el
+    admin al autorizar el correo. Devuelve 'admin'/'encargado' si se
+    pre-asignó uno, o 'solicitante' por defecto.
+    """
+    db_path = db_path or DB_PATH
+    conn = get_connection(db_path)
+    fila = conn.execute(
+        "SELECT rol_al_registrar FROM correos_autorizados WHERE correo=?",
+        ((correo or "").strip().lower(),),
+    ).fetchone()
+    conn.close()
+    if fila and fila[0] in ("admin", "encargado"):
+        return fila[0]
+    return "solicitante"
 
 
 def bloquear_correo(correo, db_path: str = None):
@@ -1436,7 +1473,16 @@ def asegurar_encargado_por_defecto(db_path: str = None):
     autorizar_correo(correo, ENCARGADO_POR_DEFECTO["nombre"],
                      ENCARGADO_POR_DEFECTO["area"], "sistema", db_path)
 
-    if obtener_persona(correo, db_path) is not None:
+    persona = obtener_persona(correo, db_path)
+    if persona is not None:
+        # La cuenta del creador es SIEMPRE admin: si una versión anterior la
+        # dejó como 'encargado', se asciende acá (idempotente). Así el creador
+        # nunca pierde la capacidad de gestionar roles.
+        if persona.get("rol") != "admin":
+            conn = get_connection(db_path)
+            conn.execute("UPDATE personas_registradas SET rol='admin' WHERE correo=?", (correo,))
+            conn.commit()
+            conn.close()
         return True, ""
 
     password = _password_encargado()
@@ -1449,16 +1495,34 @@ def asegurar_encargado_por_defecto(db_path: str = None):
 
     registrar_persona(
         correo, ENCARGADO_POR_DEFECTO["nombre"], ENCARGADO_POR_DEFECTO["area"],
-        "", password, db_path, rol="encargado",
+        "", password, db_path, rol="admin",
     )
     guardar_config("nombre_encargado", ENCARGADO_POR_DEFECTO["nombre"], db_path)
     return True, ""
 
 
+# Roles del sistema, de mayor a menor:
+#   'admin'      -> usa la app de encargado Y puede dar/quitar roles (crear
+#                   encargados y otros admin). Son el creador y el supervisor.
+#   'encargado'  -> usa la app de encargado (procesar solicitudes, inventario,
+#                   etc.) pero NO puede gestionar roles.
+#   'solicitante'-> hace pedidos desde la web.
+ROLES_CON_ACCESO_ENCARGADO = ("admin", "encargado")
+
+
 def es_encargado(correo, db_path: str = None) -> bool:
+    """True si la cuenta puede entrar a la app de encargado (admin o encargado)."""
     db_path = db_path or DB_PATH
     persona = obtener_persona(correo, db_path)
-    return bool(persona) and persona.get("rol") == "encargado"
+    return bool(persona) and persona.get("rol") in ROLES_CON_ACCESO_ENCARGADO
+
+
+def es_admin(correo, db_path: str = None) -> bool:
+    """True solo para los admin (creador y supervisor): los únicos que pueden
+    dar/quitar el rol de encargado a otras cuentas."""
+    db_path = db_path or DB_PATH
+    persona = obtener_persona(correo, db_path)
+    return bool(persona) and persona.get("rol") == "admin"
 
 
 def cambiar_password(correo, password_actual, password_nuevo, confirmacion,
@@ -1533,6 +1597,106 @@ def obtener_persona(correo, db_path: str = None):
         "nombre_supervisor": fila[2] or "", "correo_supervisor": fila[3],
         "fecha_registro": fila[4], "rol": fila[5],
     }
+
+
+def actualizar_datos_persona(correo, nombre, area_departamento, nombre_supervisor,
+                             db_path: str = None):
+    """
+    Actualiza los datos de la cuenta (nombre, área/departamento, supervisor).
+    NO toca la contraseña ni el rol. La oficina no se guarda acá: se pide en
+    cada solicitud. Devuelve (ok, mensaje).
+    """
+    db_path = db_path or DB_PATH
+    correo = (correo or "").strip().lower()
+    nombre = (nombre or "").strip()
+    area = (area_departamento or "").strip()
+    supervisor = (nombre_supervisor or "").strip()
+    if not nombre:
+        return False, "El nombre no puede quedar vacío."
+    if not area:
+        return False, "El área / departamento no puede quedar vacío."
+    conn = get_connection(db_path)
+    existe = conn.execute(
+        "SELECT 1 FROM personas_registradas WHERE correo=?", (correo,)
+    ).fetchone()
+    if existe is None:
+        conn.close()
+        return False, "La cuenta no existe."
+    conn.execute(
+        "UPDATE personas_registradas SET nombre=?, area_departamento=?, nombre_supervisor=? "
+        "WHERE correo=?",
+        (nombre, area, supervisor, correo),
+    )
+    conn.commit()
+    conn.close()
+    return True, "Datos actualizados."
+
+
+# ---------------------------------------------- gestión de encargados (roles)
+
+def listar_personas_registradas(db_path: str = None) -> pd.DataFrame:
+    """Personas registradas con su rol, para poder gestionar quién es
+    encargado. Encargados primero."""
+    db_path = db_path or DB_PATH
+    conn = get_connection(db_path)
+    df = pd.read_sql(
+        "SELECT correo, nombre, area_departamento, COALESCE(rol, 'solicitante') AS rol "
+        "FROM personas_registradas ORDER BY (COALESCE(rol,'solicitante')='encargado') DESC, nombre",
+        conn,
+    )
+    conn.close()
+    return df
+
+
+def contar_admins(db_path: str = None) -> int:
+    db_path = db_path or DB_PATH
+    conn = get_connection(db_path)
+    n = conn.execute(
+        "SELECT COUNT(*) FROM personas_registradas WHERE COALESCE(rol,'solicitante')='admin'"
+    ).fetchone()[0]
+    conn.close()
+    return int(n)
+
+
+ETIQUETAS_ROL = {"admin": "Administrador", "encargado": "Encargado", "solicitante": "Solicitante"}
+
+
+def cambiar_rol(correo, nuevo_rol, db_path: str = None):
+    """
+    Cambia el rol de una cuenta ya registrada (solo la ejecutan los admin,
+    ver es_admin). Reglas:
+      - roles válidos: 'admin', 'encargado', 'solicitante'.
+      - para dar acceso de encargado o admin, el correo tiene que estar en la
+        nómina autorizada (si no, primero hay que autorizarlo).
+      - NO se puede dejar el sistema sin ningún admin: si se intenta bajar de
+        rol al último admin, se rechaza (quedaría nadie que pueda gestionar).
+    Devuelve (ok, mensaje).
+    """
+    db_path = db_path or DB_PATH
+    correo = (correo or "").strip().lower()
+    if nuevo_rol not in ("admin", "encargado", "solicitante"):
+        return False, "Rol inválido."
+
+    persona = obtener_persona(correo, db_path)
+    if persona is None:
+        return False, "Esa cuenta no está registrada (la persona debe registrarse primero)."
+    rol_actual = persona.get("rol")
+    if rol_actual == nuevo_rol:
+        return False, f"La cuenta ya es {ETIQUETAS_ROL.get(nuevo_rol, nuevo_rol)}."
+
+    if nuevo_rol in ROLES_CON_ACCESO_ENCARGADO and not correo_autorizado(correo, db_path):
+        return False, ("Ese correo no está en la nómina autorizada. Autorícelo primero "
+                       "en 'Autorizar un correo' y después asígnele el rol.")
+    # No dejar el sistema sin ningún admin.
+    if rol_actual == "admin" and nuevo_rol != "admin" and contar_admins(db_path) <= 1:
+        return False, ("No se puede: es el único administrador del sistema. Nombre a otra "
+                       "persona administradora antes de quitarle el rol a esta.")
+
+    conn = get_connection(db_path)
+    conn.execute("UPDATE personas_registradas SET rol=? WHERE correo=?", (nuevo_rol, correo))
+    conn.commit()
+    conn.close()
+    return True, f"{correo} ahora es {ETIQUETAS_ROL.get(nuevo_rol, nuevo_rol)}."
 
 
 # ---------------------------------------------------- flujo de la solicitud

@@ -43,6 +43,7 @@ from interfaz_encargado import (
     panel_correos_autorizados,
     panel_crear_alias,
     panel_estadisticas,
+    panel_gestion_accesos,
     panel_historial,
     panel_importar_saldos,
     panel_inventario_critico,
@@ -148,12 +149,8 @@ if not es_encargado:
         st.rerun()
     st.stop()
 
-_, col_sesion = st.columns([4, 1])
-with col_sesion:
-    st.caption(f"{identidad_sesion['nombre']}  \nEncargado de bodega")
-    if st.button("Cerrar sesión", width='stretch'):
-        cerrar_sesion()
-        st.rerun()
+# La identidad y el botón de cerrar sesión viven ahora en la barra lateral
+# (ver más abajo, junto al selector de modo claro/oscuro), no en el encabezado.
 st.divider()
 
 # Respaldo local: una vez por sesión, no en cada rerun (Streamlit vuelve a
@@ -172,15 +169,11 @@ if core.SUPABASE_DB_URL and not st.session_state.get("respaldo_local_hecho"):
 
 mostrar_sidebar_cuenta(identidad_sesion)
 
-# Pista para cambiar entre modo claro y oscuro. Streamlit no deja hacerlo con
-# un botón desde el código (el tema se fija al cargar), así que se usa su menú
-# nativo, que en esta app de escritorio está habilitado (toolbarMode="viewer"
-# en config.toml). Los temas claro/oscuro ya usan los colores y la fuente
-# Roboto de la app.
-st.sidebar.caption(
-    "🎨 **Modo claro / oscuro:** menú ☰ (arriba a la derecha) → "
-    "*Settings* → *Choose app theme* → Light / Dark / Use system setting."
-)
+# Pista del modo claro/oscuro (el cierre de sesión lo pone "Mi cuenta" en el
+# sidebar). El tema se cambia desde el menú nativo de Streamlit —habilitado en
+# esta app con toolbarMode="viewer"— porque no se puede cambiar por botón desde
+# el código.
+st.sidebar.caption("🎨 Modo claro/oscuro: menú ☰")
 
 if core.actualizacion_semanal_pendiente():
     if not st.session_state.alerta_sync_vista:
@@ -202,12 +195,20 @@ if core.actualizacion_semanal_pendiente():
 if core.nombre_encargado() != identidad_sesion["nombre"]:
     core.guardar_config("nombre_encargado", identidad_sesion["nombre"])
 
-tabs = st.tabs([
+# La pestaña "Gestionar accesos" (dar/quitar rol de encargado) la ven SOLO los
+# administradores (creador y supervisor), no el encargado común.
+es_admin = identidad_sesion.get("rol") == "admin"
+
+etiquetas_tabs = [
     "Nueva solicitud", "Solicitudes activas", "Pedidos completados",
     "Inventario general", "Inventario crítico", "Actualizar saldos",
     "Historial", "Estadísticas", "Crear alias", "Correos autorizados",
     "Sincronización SMC",
-])
+]
+if es_admin:
+    etiquetas_tabs.append("Gestionar accesos")
+
+tabs = st.tabs(etiquetas_tabs)
 with tabs[0]:
     panel_nueva_solicitud(es_encargado=True)
 with tabs[1]:
@@ -230,3 +231,6 @@ with tabs[9]:
     panel_correos_autorizados()
 with tabs[10]:
     panel_sync_smc()
+if es_admin:
+    with tabs[11]:
+        panel_gestion_accesos()
