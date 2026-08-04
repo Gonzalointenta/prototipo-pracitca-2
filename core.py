@@ -3232,6 +3232,29 @@ def exportar_historial_excel(ruta: str = None, carpeta_pdf: str = "formularios",
         from openpyxl.styles import PatternFill
         from openpyxl.worksheet.table import Table, TableStyleInfo
 
+        # Una hoja con el detalle COMPLETO de cada mes, además de "Detalle" (todo
+        # junto) y "Por mes" (resumen). Se agrupan las líneas por el mes de su
+        # fecha; cada grupo conserva el orden de la hoja Detalle (correlativo
+        # descendente) para que los folios queden contiguos y funcionen el
+        # coloreado por pedido y el ditto. Las líneas sin fecha reconocible, si
+        # las hubiera, van a una hoja "Sin fecha".
+        MESES_ES = {1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril",
+                    5: "Mayo", 6: "Junio", 7: "Julio", 8: "Agosto",
+                    9: "Septiembre", 10: "Octubre", 11: "Noviembre",
+                    12: "Diciembre"}
+        hojas_mes = []  # [(nombre_hoja, df_mes, nombre_tabla)]
+        if not detalle.empty:
+            periodos = pd.to_datetime(detalle["fecha"], errors="coerce").dt.to_period("M")
+            for periodo in sorted(p for p in periodos.dropna().unique()):
+                df_mes = detalle[periodos == periodo]
+                nombre_hoja = f"{periodo.year}-{periodo.month:02d} {MESES_ES[periodo.month]}"
+                hojas_mes.append((nombre_hoja, df_mes, f"Tabla_{periodo.year}_{periodo.month:02d}"))
+            sin_fecha = detalle[periodos.isna()]
+            if not sin_fecha.empty:
+                hojas_mes.append(("Sin fecha", sin_fecha, "Tabla_sin_fecha"))
+        for nombre_hoja, df_mes, _tabla in hojas_mes:
+            df_mes.to_excel(writer, sheet_name=nombre_hoja, index=False)
+
         # Formato de dinero en pesos chilenos (sin decimales, separador de miles).
         FORMATO_CLP = '"$"#,##0'
 
@@ -3247,76 +3270,41 @@ def exportar_historial_excel(ruta: str = None, carpeta_pdf: str = "formularios",
                     for fila in range(2, len(df) + 2):  # fila 1 = encabezado
                         hoja[f"{letra}{fila}"].number_format = FORMATO_CLP
 
-        hojas = {
-            "Detalle": detalle,
-            "Por producto": resumenes["producto"],
-            "Por solicitante": resumenes["solicitante"],
-            "Por departamento": resumenes["departamento"],
-            "Por mes": resumenes["mes"],
-        }
-        # Formato CLP en las columnas de valor de TODAS las hojas.
-        for nombre_hoja, df_hoja in hojas.items():
-            if df_hoja is not None and not df_hoja.empty:
-                _aplicar_formato_pesos(writer.sheets[nombre_hoja], df_hoja)
-
-        # Auto-ajuste de ancho de columnas: mide el texto más largo de cada
-        # columna (encabezado o dato) y lo usa como ancho, con un tope para que
-        # una observación larga no deje una columna gigante. Se aplica a Detalle
-        # y a todas las hojas resumen; "Por producto" recupera sus anchos fijos
-        # A/B justo después (esos valores ganan sobre el auto-ajuste).
         def _autoajustar_anchos(hoja, tope=40):
+            """Ancho de cada columna = largo del texto más largo (encabezado o
+            dato), con un tope para que una observación larga no la agrande de
+            más."""
             for columna in hoja.columns:
                 ancho = max((len(str(c.value)) for c in columna if c.value is not None), default=0)
                 hoja.column_dimensions[columna[0].column_letter].width = min(ancho + 2, tope)
 
-        for nombre_hoja, df_hoja in hojas.items():
-            if df_hoja is not None and not df_hoja.empty:
-                _autoajustar_anchos(writer.sheets[nombre_hoja])
+        # Columnas de cabecera del pedido que se colapsan a "" en las líneas
+        # repetidas de un mismo pedido (índices 1-based, calculados por nombre
+        # por si cambia el orden de las columnas de la consulta).
+        COLS_CABECERA_PEDIDO = ["folio", "fecha", "solicitante", "departamento",
+                                 "oficina", "supervisor", "entregado_por"]
+        fill_blanco = PatternFill("solid", fgColor="FFFFFFFF")
+        fill_celeste = PatternFill("solid", fgColor="FFDCE6F1")
 
-        # Anchos pedidos para "Por producto": A=400 px, B=200 px. Excel mide el
-        # ancho en caracteres, no en píxeles: se convierte con la fórmula
-        # estándar (px - 5) / 7 para la fuente por defecto. Va después del
-        # auto-ajuste para que estos valores fijos ganen.
-        def _px_a_ancho(px):
-            return round((px - 5) / 7.0, 2)
-        if not resumenes["producto"].empty:
-            hp = writer.sheets["Por producto"]
-            hp.column_dimensions["A"].width = _px_a_ancho(400)
-            hp.column_dimensions["B"].width = _px_a_ancho(200)
-
-        # Hoja Detalle: tabla (para tablas dinámicas) + colores alternados POR
-        # PEDIDO. Cada solicitud (mismo 'folio') comparte color, y al cambiar de
-        # pedido se alterna entre blanco (#FFFFFF) y celeste (#DCE6F1). Se apaga
-        # el rayado por fila de la tabla (showRowStripes=False) para que no pise
-        # el alternado manual por pedido.
-        #
-        # Además, los datos de cabecera del pedido (folio, fecha, solicitante,
-        # departamento, oficina, supervisor y entregado_por) son idénticos en
-        # todas las líneas de un mismo pedido: se dejan solo en la PRIMERA línea
-        # del pedido y en las siguientes se marca con "" (a la manera del Excel
-        # original del encargado). Nota: esto hace la hoja más legible pero
-        # rompe las tablas dinámicas que agrupen por esas columnas.
-        if not detalle.empty:
-            hoja = writer.sheets["Detalle"]
-            n_filas, n_cols = detalle.shape
+        def _formatear_detalle(hoja, df, nombre_tabla):
+            """Deja una hoja de detalle como Tabla de Excel (para dinámicas) con
+            colores alternados POR PEDIDO —cada folio comparte color, alternando
+            blanco/#FFFFFF y celeste/#DCE6F1— y la cabecera del pedido colapsada
+            a "" en las líneas repetidas. Se apaga el rayado por fila de la tabla
+            (showRowStripes=False) para no pisar el alternado por pedido. Nota:
+            el ditto rompe las tablas dinámicas que agrupen por esas columnas."""
+            n_filas, n_cols = df.shape
+            if n_filas == 0:
+                return
             ultima_col = get_column_letter(n_cols)
-            tabla = Table(displayName="TablaHistorial", ref=f"A1:{ultima_col}{n_filas + 1}")
+            tabla = Table(displayName=nombre_tabla, ref=f"A1:{ultima_col}{n_filas + 1}")
             tabla.tableStyleInfo = TableStyleInfo(name="TableStyleMedium2", showRowStripes=False)
             hoja.add_table(tabla)
-
-            # Columnas de cabecera del pedido que se colapsan a "" en las líneas
-            # repetidas (índices 1-based, calculados por nombre por si cambia el
-            # orden de las columnas de la consulta).
-            COLS_CABECERA_PEDIDO = ["folio", "fecha", "solicitante", "departamento",
-                                     "oficina", "supervisor", "entregado_por"]
-            indices_cabecera = [detalle.columns.get_loc(c) + 1
-                                 for c in COLS_CABECERA_PEDIDO if c in detalle.columns]
-
-            fill_blanco = PatternFill("solid", fgColor="FFFFFFFF")
-            fill_celeste = PatternFill("solid", fgColor="FFDCE6F1")
+            indices_cabecera = [df.columns.get_loc(c) + 1
+                                for c in COLS_CABECERA_PEDIDO if c in df.columns]
             folio_previo = object()  # centinela distinto de cualquier folio real
             usar_celeste = False
-            for i, folio_val in enumerate(detalle["folio"].tolist()):
+            for i, folio_val in enumerate(df["folio"].tolist()):
                 es_primera_linea = folio_val != folio_previo
                 if es_primera_linea:
                     usar_celeste = not usar_celeste
@@ -3327,6 +3315,37 @@ def exportar_historial_excel(ruta: str = None, carpeta_pdf: str = "formularios",
                 if not es_primera_linea:  # línea repetida del pedido -> "" (ditto)
                     for col in indices_cabecera:
                         hoja.cell(row=i + 2, column=col).value = '""'
+
+        hojas = {
+            "Detalle": detalle,
+            "Por producto": resumenes["producto"],
+            "Por solicitante": resumenes["solicitante"],
+            "Por departamento": resumenes["departamento"],
+            "Por mes": resumenes["mes"],
+        }
+        # Formato CLP y auto-ajuste de anchos en TODAS las hojas (base + mensuales).
+        # El auto-ajuste corre antes del ditto, así mide los valores completos.
+        for nombre_hoja, df_hoja in list(hojas.items()) + [(n, d) for n, d, _ in hojas_mes]:
+            if df_hoja is not None and not df_hoja.empty:
+                _aplicar_formato_pesos(writer.sheets[nombre_hoja], df_hoja)
+                _autoajustar_anchos(writer.sheets[nombre_hoja])
+
+        # Anchos fijos de "Por producto": A=400 px, B=200 px. Excel mide el ancho
+        # en caracteres, no en píxeles: se convierte con (px - 5) / 7 para la
+        # fuente por defecto. Va después del auto-ajuste para que estos ganen.
+        def _px_a_ancho(px):
+            return round((px - 5) / 7.0, 2)
+        if not resumenes["producto"].empty:
+            hp = writer.sheets["Por producto"]
+            hp.column_dimensions["A"].width = _px_a_ancho(400)
+            hp.column_dimensions["B"].width = _px_a_ancho(200)
+
+        # Tabla + colores por pedido + ditto: en la hoja Detalle (todo junto) y
+        # en cada hoja mensual.
+        if not detalle.empty:
+            _formatear_detalle(writer.sheets["Detalle"], detalle, "TablaHistorial")
+        for nombre_hoja, df_mes, nombre_tabla in hojas_mes:
+            _formatear_detalle(writer.sheets[nombre_hoja], df_mes, nombre_tabla)
 
     guardar_config("ultima_generacion_excel_historial",
                     ahora_chile().strftime("%Y-%m-%d %H:%M"), db_path)
