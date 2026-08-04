@@ -3196,7 +3196,7 @@ def exportar_historial_excel(ruta: str = None, carpeta_pdf: str = "formularios",
         JOIN solicitud_detalle d ON d.solicitud_id = s.id
         JOIN productos p ON p.codigo = d.codigo_producto
         WHERE s.estado = 'cerrada'
-        ORDER BY s.correlativo DESC
+        ORDER BY s.correlativo ASC
         """,
         conn,
     )
@@ -3232,24 +3232,27 @@ def exportar_historial_excel(ruta: str = None, carpeta_pdf: str = "formularios",
         from openpyxl.styles import PatternFill
         from openpyxl.worksheet.table import Table, TableStyleInfo
 
-        # Una hoja con el detalle COMPLETO de cada mes, además de "Detalle" (todo
-        # junto) y "Por mes" (resumen). Se agrupan las líneas por el mes de su
-        # fecha; cada grupo conserva el orden de la hoja Detalle (correlativo
-        # descendente) para que los folios queden contiguos y funcionen el
-        # coloreado por pedido y el ditto. Las líneas sin fecha reconocible, si
-        # las hubiera, van a una hoja "Sin fecha".
+        # Una hoja por MES CALENDARIO (Enero..Diciembre), además de "Detalle"
+        # (todo junto) y "Por mes" (resumen). Cada hoja junta TODOS los pedidos
+        # de ese mes sin importar el año (todos los eneros en "Enero", etc.),
+        # ordenados por fecha ascendente. El orden es estable, así las líneas de
+        # un mismo pedido (que comparten fecha) quedan contiguas y siguen
+        # funcionando el coloreado por pedido y el ditto. Las líneas sin fecha
+        # reconocible, si las hubiera, van a una hoja "Sin fecha".
         MESES_ES = {1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril",
                     5: "Mayo", 6: "Junio", 7: "Julio", 8: "Agosto",
                     9: "Septiembre", 10: "Octubre", 11: "Noviembre",
                     12: "Diciembre"}
         hojas_mes = []  # [(nombre_hoja, df_mes, nombre_tabla)]
         if not detalle.empty:
-            periodos = pd.to_datetime(detalle["fecha"], errors="coerce").dt.to_period("M")
-            for periodo in sorted(p for p in periodos.dropna().unique()):
-                df_mes = detalle[periodos == periodo]
-                nombre_hoja = f"{periodo.year}-{periodo.month:02d} {MESES_ES[periodo.month]}"
-                hojas_mes.append((nombre_hoja, df_mes, f"Tabla_{periodo.year}_{periodo.month:02d}"))
-            sin_fecha = detalle[periodos.isna()]
+            fechas = pd.to_datetime(detalle["fecha"], errors="coerce")
+            mes_num = fechas.dt.month
+            for numero in sorted({int(m) for m in mes_num.dropna().unique()}):
+                mascara = mes_num == numero
+                orden = fechas[mascara].sort_values(kind="stable").index  # cronológico
+                df_mes = detalle.loc[orden]
+                hojas_mes.append((MESES_ES[numero], df_mes, f"Tabla_{numero:02d}"))
+            sin_fecha = detalle[mes_num.isna()]
             if not sin_fecha.empty:
                 hojas_mes.append(("Sin fecha", sin_fecha, "Tabla_sin_fecha"))
         for nombre_hoja, df_mes, _tabla in hojas_mes:
