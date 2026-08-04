@@ -1796,6 +1796,116 @@ def editar_entrega(folio, codigo_producto, cantidad_entregada, db_path: str = No
     conn.close()
 
 
+# Prefijo de código para productos creados a mano al procesar un pedido: algo
+# que el solicitante trajo escrito y timbrado pero que no estaba en el catálogo
+# SMC. Sirve para distinguirlos — a estos NO se les descuenta stock al cerrar,
+# porque no hay un saldo real registrado (ver cerrar_solicitud).
+PREFIJO_PRODUCTO_MANUAL = "MAN-"
+
+
+def es_producto_manual(codigo) -> bool:
+    return str(codigo).startswith(PREFIJO_PRODUCTO_MANUAL)
+
+
+def crear_producto_manual(nombre, unidad_medida="", valor_unitario=0,
+                          categoria="SIN CATEGORÍA", db_path: str = None) -> str:
+    """
+    Crea un producto que no estaba en el catálogo, para poder sumarlo a un
+    pedido cuando el solicitante trajo algo escrito a mano y timbrado. Le asigna
+    un código propio con prefijo MAN- (no choca con los códigos numéricos del
+    catálogo SMC), lo deja activo y buscable (registra su nombre como alias) y
+    arranca sin stock (saldo 0). Devuelve el código generado.
+    """
+    db_path = db_path or DB_PATH
+    nombre = (nombre or "").strip()
+    if not nombre:
+        raise ValueError("El producto nuevo necesita un nombre.")
+    conn = get_connection(db_path)
+    # Se evita duplicar un nombre que ya existe en el catálogo: en ese caso hay
+    # que buscarlo y agregarlo, no crear un gemelo (además, varias rutas ubican
+    # el producto por nombre_estandar y un nombre repetido las volvería ambiguas).
+    existe = conn.execute(
+        "SELECT codigo FROM productos WHERE nombre_estandar=?", (nombre,)
+    ).fetchone()
+    if existe:
+        conn.close()
+        raise ValueError(
+            f'Ya existe un producto llamado "{nombre}" en el catálogo: '
+            "búsquelo con el buscador y agréguelo, en vez de crear uno nuevo."
+        )
+    # Siguiente número de la secuencia MAN-0001, MAN-0002, ...
+    codigos = conn.execute(
+        "SELECT codigo FROM productos WHERE codigo LIKE 'MAN-%'"
+    ).fetchall()
+    maximo = 0
+    for (c,) in codigos:
+        try:
+            maximo = max(maximo, int(str(c).split("-", 1)[1]))
+        except (IndexError, ValueError):
+            pass
+    codigo = f"{PREFIJO_PRODUCTO_MANUAL}{maximo + 1:04d}"
+    conn.execute(
+        "INSERT INTO productos "
+        "(codigo, nombre_estandar, unidad_medida, categoria, saldo, stock_critico, "
+        " valor_saldo, valor_unitario, activo) "
+        "VALUES (?, ?, ?, ?, 0, 0, 0, ?, 1)",
+        (codigo, nombre, (unidad_medida or "").strip(),
+         (categoria or "SIN CATEGORÍA").strip(), float(valor_unitario or 0)),
+    )
+    # el nombre también queda como su propio alias de búsqueda (igual que en cargar_catalogo)
+    conn.execute(
+        "INSERT INTO alias_productos (texto_alias, texto_alias_normalizado, codigo_producto) "
+        "VALUES (?, ?, ?)",
+        (nombre, normalizar(nombre), codigo),
+    )
+    conn.commit()
+    conn.close()
+    invalidar_cache_lecturas()
+    return codigo
+
+
+def agregar_producto_a_solicitud(folio, codigo_producto, cantidad, db_path: str = None):
+    """
+    Suma una línea de producto a un pedido en curso (no cerrado ni anulado): el
+    caso típico es algo escrito a mano y timbrado que no venía en el pedido
+    digital. Deja el pedido en estado 'editada' y evita duplicar un producto que
+    ya estuviera en el pedido.
+    """
+    db_path = db_path or DB_PATH
+    conn = get_connection(db_path)
+    fila = conn.execute(
+        "SELECT id, estado FROM solicitudes WHERE folio=?", (folio,)
+    ).fetchone()
+    if fila is None:
+        conn.close()
+        raise ValueError("Folio no encontrado.")
+    solicitud_id, estado = fila
+    if estado in ("cerrada", "anulada"):
+        conn.close()
+        raise ValueError(f"No se puede agregar productos a una solicitud '{estado}'.")
+    ya_esta = conn.execute(
+        "SELECT 1 FROM solicitud_detalle WHERE solicitud_id=? AND codigo_producto=?",
+        (solicitud_id, codigo_producto),
+    ).fetchone()
+    if ya_esta:
+        conn.close()
+        raise ValueError("Ese producto ya está en el pedido; ajuste su cantidad en la lista.")
+    cantidad_i = formatear_cantidad(cantidad)
+    if es_producto_manual(codigo_producto):
+        mensaje = "Producto agregado a mano (fuera de catálogo)."
+    else:
+        _, mensaje = validar_disponibilidad(codigo_producto, cantidad_i, db_path)
+    conn.execute(
+        "INSERT INTO solicitud_detalle "
+        "(solicitud_id, codigo_producto, cantidad_solicitada, cantidad_entregada, mensaje_sistema) "
+        "VALUES (?, ?, ?, NULL, ?)",
+        (solicitud_id, codigo_producto, cantidad_i, mensaje),
+    )
+    conn.execute("UPDATE solicitudes SET estado='editada' WHERE folio=?", (folio,))
+    conn.commit()
+    conn.close()
+
+
 def modificar_cantidad_solicitada(folio, codigo_producto, nueva_cantidad, db_path: str = None):
     """
     Potestad del encargado: corregir lo que el solicitante pidió (ej. el
@@ -1879,11 +1989,16 @@ def cerrar_solicitud(folio, db_path: str = None, usuario_operacion=None):
         # del corte (no uno recalculado). El '(saldo - ?)' del SET usa el saldo
         # ANTERIOR a este UPDATE (así lo evalúan tanto SQLite como Postgres),
         # por lo que queda valor_unitario * (saldo nuevo).
-        conn.execute(
-            "UPDATE productos SET saldo = saldo - ?, "
-            "valor_saldo = valor_unitario * (saldo - ?) WHERE codigo = ?",
-            (cantidad_real, cantidad_real, codigo),
-        )
+        # Los productos agregados a mano (MAN-) no tienen un saldo real
+        # registrado: no se les descuenta stock (dejaría el inventario en
+        # negativo con una alerta falsa de 'agotado'). Igual se deja constancia
+        # de la entrega en solicitud_detalle (cantidad y valor), más abajo.
+        if not es_producto_manual(codigo):
+            conn.execute(
+                "UPDATE productos SET saldo = saldo - ?, "
+                "valor_saldo = valor_unitario * (saldo - ?) WHERE codigo = ?",
+                (cantidad_real, cantidad_real, codigo),
+            )
         conn.execute(
             "UPDATE solicitud_detalle SET cantidad_entregada=?, valor_movimiento=? "
             "WHERE solicitud_id=? AND codigo_producto=?",
@@ -1894,6 +2009,8 @@ def cerrar_solicitud(folio, db_path: str = None, usuario_operacion=None):
 
     for fila in detalle:
         codigo = fila[0]
+        if es_producto_manual(codigo):
+            continue  # sin saldo real: no corresponde alertar por stock
         tipo, mensaje = evaluar_alerta_stock(codigo, db_path)
         if tipo != "ok":
             alertas.append((codigo, tipo, mensaje))

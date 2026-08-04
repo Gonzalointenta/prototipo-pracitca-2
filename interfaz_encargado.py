@@ -177,6 +177,62 @@ def panel_solicitudes_activas():
             st.session_state.folio_preparando = folio
             st.rerun()
 
+        # ---- agregar un producto que no venía en el pedido (algo que el
+        # solicitante trajo escrito a mano y timbrado). Solo mientras se edita,
+        # no en el paso del comprobante. Se guardan primero las cantidades ya
+        # tipeadas para no perderlas al recargar con el producto nuevo incluido.
+        if st.session_state.get("folio_preparando") != folio:
+            with st.expander("➕ Agregar un producto que no estaba en el pedido"):
+                st.caption("Para algo que el solicitante trajo escrito a mano y timbrado "
+                           "y que no aparecía en el sistema.")
+
+                st.markdown("**1) Buscar en el catálogo** (puede estar en el sistema aunque no viniera en el pedido)")
+                texto = st.text_input("Nombre del producto", key=f"buscar_prod_{n}",
+                                      placeholder="ej. tijera, resma, cloro…")
+                if texto:
+                    candidatos = core.buscar_producto(texto)
+                    if candidatos:
+                        opciones = {f"{nom}  ·  código {cod}": cod for cod, nom, _ in candidatos}
+                        elegido_cat = st.selectbox("Coincidencias", list(opciones.keys()),
+                                                   key=f"cat_sel_{n}")
+                        cant_cat = st.number_input("Cantidad", min_value=1, step=1, value=1,
+                                                   key=f"cat_cant_{n}")
+                        if st.button("Agregar al pedido", key=f"cat_add_{n}"):
+                            guardar_cantidades()
+                            try:
+                                core.agregar_producto_a_solicitud(folio, opciones[elegido_cat], cant_cat)
+                            except ValueError as e:
+                                st.warning(str(e))
+                            else:
+                                st.rerun()
+                    else:
+                        st.caption("Sin coincidencias en el catálogo. Puede crearlo abajo.")
+
+                st.divider()
+                st.markdown("**2) ¿No está en el sistema? Crear producto nuevo**")
+                nombre_nuevo = st.text_input("Nombre del producto nuevo", key=f"np_nom_{n}")
+                cc1, cc2, cc3 = st.columns(3)
+                unidad_nueva = cc1.text_input("Unidad", key=f"np_uni_{n}", placeholder="UN, CAJA…")
+                valor_nuevo = cc2.number_input("Valor unitario ($) — opcional", min_value=0,
+                                               step=1, value=0, key=f"np_val_{n}")
+                cant_nueva = cc3.number_input("Cantidad", min_value=1, step=1, value=1,
+                                              key=f"np_cant_{n}")
+                st.caption("Se crea en el catálogo (queda buscable). No se le descuenta stock "
+                           "al cerrar, porque no tiene saldo registrado.")
+                if st.button("Crear y agregar al pedido", key=f"np_add_{n}"):
+                    if not nombre_nuevo.strip():
+                        st.warning("Escriba el nombre del producto nuevo.")
+                    else:
+                        guardar_cantidades()
+                        try:
+                            codigo_nuevo = core.crear_producto_manual(
+                                nombre_nuevo, unidad_nueva, valor_nuevo)
+                            core.agregar_producto_a_solicitud(folio, codigo_nuevo, cant_nueva)
+                        except ValueError as e:
+                            st.warning(str(e))
+                        else:
+                            st.rerun()
+
         # ---- paso 3: comprobante primero, descuento de stock al final
         #
         # El descuento se dejó para el último paso a propósito: así el
