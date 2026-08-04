@@ -3228,19 +3228,105 @@ def exportar_historial_excel(ruta: str = None, carpeta_pdf: str = "formularios",
         resumenes["departamento"].to_excel(writer, sheet_name="Por departamento", index=False)
         resumenes["mes"].to_excel(writer, sheet_name="Por mes", index=False)
 
-        if not detalle.empty:
-            from openpyxl.utils import get_column_letter
-            from openpyxl.worksheet.table import Table, TableStyleInfo
+        from openpyxl.utils import get_column_letter
+        from openpyxl.styles import PatternFill
+        from openpyxl.worksheet.table import Table, TableStyleInfo
 
+        # Formato de dinero en pesos chilenos (sin decimales, separador de miles).
+        FORMATO_CLP = '"$"#,##0'
+
+        def _es_columna_valor(nombre) -> bool:
+            return "valor" in str(nombre).strip().lower()
+
+        def _aplicar_formato_pesos(hoja, df):
+            """Pone formato CLP a toda columna cuyo encabezado tenga 'valor'
+            (valor, valor_unitario, valor_total, valor_entregado, etc.)."""
+            for indice, encabezado in enumerate(df.columns, start=1):
+                if _es_columna_valor(encabezado):
+                    letra = get_column_letter(indice)
+                    for fila in range(2, len(df) + 2):  # fila 1 = encabezado
+                        hoja[f"{letra}{fila}"].number_format = FORMATO_CLP
+
+        hojas = {
+            "Detalle": detalle,
+            "Por producto": resumenes["producto"],
+            "Por solicitante": resumenes["solicitante"],
+            "Por departamento": resumenes["departamento"],
+            "Por mes": resumenes["mes"],
+        }
+        # Formato CLP en las columnas de valor de TODAS las hojas.
+        for nombre_hoja, df_hoja in hojas.items():
+            if df_hoja is not None and not df_hoja.empty:
+                _aplicar_formato_pesos(writer.sheets[nombre_hoja], df_hoja)
+
+        # Auto-ajuste de ancho de columnas: mide el texto más largo de cada
+        # columna (encabezado o dato) y lo usa como ancho, con un tope para que
+        # una observación larga no deje una columna gigante. Se aplica a Detalle
+        # y a todas las hojas resumen; "Por producto" recupera sus anchos fijos
+        # A/B justo después (esos valores ganan sobre el auto-ajuste).
+        def _autoajustar_anchos(hoja, tope=40):
+            for columna in hoja.columns:
+                ancho = max((len(str(c.value)) for c in columna if c.value is not None), default=0)
+                hoja.column_dimensions[columna[0].column_letter].width = min(ancho + 2, tope)
+
+        for nombre_hoja, df_hoja in hojas.items():
+            if df_hoja is not None and not df_hoja.empty:
+                _autoajustar_anchos(writer.sheets[nombre_hoja])
+
+        # Anchos pedidos para "Por producto": A=400 px, B=200 px. Excel mide el
+        # ancho en caracteres, no en píxeles: se convierte con la fórmula
+        # estándar (px - 5) / 7 para la fuente por defecto. Va después del
+        # auto-ajuste para que estos valores fijos ganen.
+        def _px_a_ancho(px):
+            return round((px - 5) / 7.0, 2)
+        if not resumenes["producto"].empty:
+            hp = writer.sheets["Por producto"]
+            hp.column_dimensions["A"].width = _px_a_ancho(400)
+            hp.column_dimensions["B"].width = _px_a_ancho(200)
+
+        # Hoja Detalle: tabla (para tablas dinámicas) + colores alternados POR
+        # PEDIDO. Cada solicitud (mismo 'folio') comparte color, y al cambiar de
+        # pedido se alterna entre blanco (#FFFFFF) y celeste (#DCE6F1). Se apaga
+        # el rayado por fila de la tabla (showRowStripes=False) para que no pise
+        # el alternado manual por pedido.
+        #
+        # Además, los datos de cabecera del pedido (folio, fecha, solicitante,
+        # departamento, oficina, supervisor y entregado_por) son idénticos en
+        # todas las líneas de un mismo pedido: se dejan solo en la PRIMERA línea
+        # del pedido y en las siguientes se marca con "" (a la manera del Excel
+        # original del encargado). Nota: esto hace la hoja más legible pero
+        # rompe las tablas dinámicas que agrupen por esas columnas.
+        if not detalle.empty:
             hoja = writer.sheets["Detalle"]
             n_filas, n_cols = detalle.shape
             ultima_col = get_column_letter(n_cols)
             tabla = Table(displayName="TablaHistorial", ref=f"A1:{ultima_col}{n_filas + 1}")
-            tabla.tableStyleInfo = TableStyleInfo(name="TableStyleMedium2", showRowStripes=True)
+            tabla.tableStyleInfo = TableStyleInfo(name="TableStyleMedium2", showRowStripes=False)
             hoja.add_table(tabla)
-            for columna in hoja.columns:
-                ancho = max((len(str(c.value)) for c in columna if c.value is not None), default=0)
-                hoja.column_dimensions[columna[0].column_letter].width = min(ancho + 2, 40)
+
+            # Columnas de cabecera del pedido que se colapsan a "" en las líneas
+            # repetidas (índices 1-based, calculados por nombre por si cambia el
+            # orden de las columnas de la consulta).
+            COLS_CABECERA_PEDIDO = ["folio", "fecha", "solicitante", "departamento",
+                                     "oficina", "supervisor", "entregado_por"]
+            indices_cabecera = [detalle.columns.get_loc(c) + 1
+                                 for c in COLS_CABECERA_PEDIDO if c in detalle.columns]
+
+            fill_blanco = PatternFill("solid", fgColor="FFFFFFFF")
+            fill_celeste = PatternFill("solid", fgColor="FFDCE6F1")
+            folio_previo = object()  # centinela distinto de cualquier folio real
+            usar_celeste = False
+            for i, folio_val in enumerate(detalle["folio"].tolist()):
+                es_primera_linea = folio_val != folio_previo
+                if es_primera_linea:
+                    usar_celeste = not usar_celeste
+                    folio_previo = folio_val
+                relleno = fill_celeste if usar_celeste else fill_blanco
+                for col in range(1, n_cols + 1):
+                    hoja.cell(row=i + 2, column=col).fill = relleno  # +2: fila 1 = encabezado
+                if not es_primera_linea:  # línea repetida del pedido -> "" (ditto)
+                    for col in indices_cabecera:
+                        hoja.cell(row=i + 2, column=col).value = '""'
 
     guardar_config("ultima_generacion_excel_historial",
                     ahora_chile().strftime("%Y-%m-%d %H:%M"), db_path)
