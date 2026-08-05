@@ -1,6 +1,12 @@
-streamlit
-pandas
-rapidfuzz
-reportlab
-tzdata
-psycopg2-binary
+streamlit==1.59.2
+# starlette y uvicorn son dependencias internas de streamlit (su servidor web
+# ASGI). Van fijadas a la par de streamlit: un starlette más nuevo agregó el
+# argumento obligatorio 'thread_minimum_size' a GZipResponder y rompía el
+# middleware gzip de streamlit 1.59.2 ("TypeError ... missing ... thread_minimum_size").
+starlette==1.3.1
+uvicorn==0.51.0
+pandas==3.0.3
+rapidfuzz==3.14.5
+reportlab==5.0.0
+tzdata==2026.3
+psycopg2-binary==2.9.12
