@@ -1971,26 +1971,32 @@ def modificar_cantidad_solicitada(folio, codigo_producto, nueva_cantidad, db_pat
 
 def anular_solicitud(folio, motivo, db_path: str = None):
     """
-    Potestad del encargado: anular una solicitud completa antes de cerrarla
-    (ej. el solicitante nunca volvió con el papel firmado, se duplicó, o se
-    canceló la necesidad). No descuenta stock porque una solicitud anulada
-    nunca llegó a 'cerrada'. Queda con motivo registrado para trazabilidad.
+    Potestad del encargado: anular una solicitud antes de cerrarla (ej. el
+    solicitante nunca volvió con el papel firmado, no había stock, o no se
+    entrega nada de lo pedido). En bodega una solicitud sin entrega SIMPLEMENTE
+    SE DESECHA, así que se DESCARTA por completo (se borra la fila y su detalle)
+    en vez de dejarla marcada 'anulada'. Motivo por el que se borra en vez de
+    marcar: que el número de folio quede LIBRE y se reutilice — como
+    siguiente_correlativo es MAX(correlativo)+1, borrar la última solicitud hace
+    que el próximo pedido tome ese mismo número, sin quemar folios en anulaciones.
+    No descuenta stock: una solicitud sin cerrar nunca lo tocó. El parámetro
+    'motivo' se conserva por compatibilidad con la interfaz (ya no se guarda,
+    porque la fila deja de existir).
     """
     db_path = db_path or DB_PATH
     conn = get_connection(db_path)
-    estado_actual = conn.execute(
-        "SELECT estado FROM solicitudes WHERE folio=?", (folio,)
+    fila = conn.execute(
+        "SELECT id, estado FROM solicitudes WHERE folio=?", (folio,)
     ).fetchone()
-    if estado_actual is None:
+    if fila is None:
         conn.close()
         raise ValueError("Folio no encontrado.")
-    if estado_actual[0] == "cerrada":
+    solicitud_id, estado_actual = fila
+    if estado_actual == "cerrada":
         conn.close()
         raise ValueError("No se puede anular una solicitud ya cerrada (el stock ya se descontó).")
-    conn.execute(
-        "UPDATE solicitudes SET estado='anulada', motivo_anulacion=? WHERE folio=?",
-        (motivo, folio),
-    )
+    conn.execute("DELETE FROM solicitud_detalle WHERE solicitud_id=?", (solicitud_id,))
+    conn.execute("DELETE FROM solicitudes WHERE id=?", (solicitud_id,))
     conn.commit()
     conn.close()
 
