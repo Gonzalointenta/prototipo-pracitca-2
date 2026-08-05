@@ -236,8 +236,12 @@ _PANELES = {
 st.markdown(
     """
     <style>
+    /* el contenedor externo del sidebar NO scrollea: el único scroll es el de
+       la lista de secciones (.st-key-nav_scroll). Así se elimina la barra de
+       scroll redundante del sidebar, dejando solo la de "ir entre herramientas". */
+    section[data-testid="stSidebar"] [data-testid="stSidebarUserContent"]{ overflow:hidden !important; }
     section[data-testid="stSidebar"] [data-testid="stSidebarUserContent"] > div > [data-testid="stVerticalBlock"]{
-        display:flex; flex-direction:column; height: calc(100vh - 90px);
+        display:flex; flex-direction:column; height: calc(100vh - 90px); overflow:hidden;
     }
     [data-testid="stLayoutWrapper"]:has(> [data-testid="stVerticalBlock"].st-key-nav_scroll){
         flex:1 1 auto; min-height:0; display:flex;
