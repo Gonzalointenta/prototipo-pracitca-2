@@ -1177,6 +1177,33 @@ USUARIO_BODEGA_POR_DEFECTO = "Gonzalo Fierro Cea"
 CORRELATIVO_INICIAL = 2900  # el talonario físico va en 2798 (mayo); se parte en 2900
 
 
+# Partículas de enlace que dentro de un nombre/apellido van en minúscula (salvo
+# cuando abren el nombre): "Juan de la Cruz", "María de los Ángeles".
+_PARTICULAS_NOMBRE = {"de", "del", "la", "las", "los", "y", "e", "da", "do", "dos", "van", "von"}
+
+
+def formatear_nombre_persona(nombre) -> str:
+    """
+    Deja un nombre de persona en un formato uniforme, para que no queden unos en
+    MAYÚSCULAS, otros en minúscula y otros mezclados: inicial de cada palabra en
+    mayúscula y el resto en minúscula, con los espacios colapsados. NO recorta
+    palabras, así respeta apellidos compuestos ('SAN MIGUEL' -> 'San Miguel') y
+    los segundos nombres/apellidos. Las partículas de enlace ('de', 'la',
+    'del'...) quedan en minúscula salvo cuando abren el nombre.
+    Ej.: 'cristian SAN miguel' -> 'Cristian San Miguel'.
+    """
+    palabras = str(nombre or "").split()
+    resultado = []
+    for i, palabra in enumerate(palabras):
+        baja = palabra.lower()
+        if i > 0 and baja in _PARTICULAS_NOMBRE:
+            resultado.append(baja)
+        else:
+            # respeta guiones internos (Ana-María) capitalizando cada parte
+            resultado.append("-".join(parte.capitalize() for parte in baja.split("-")))
+    return " ".join(resultado)
+
+
 def autorizar_correo(correo, nombre_referencia="", area_departamento="", dado_de_alta_por="encargado",
                      db_path: str = None, rol_al_registrar=None):
     """
@@ -1209,8 +1236,8 @@ def autorizar_correo(correo, nombre_referencia="", area_departamento="", dado_de
         "fecha_alta = EXCLUDED.fecha_alta, "
         "dado_de_alta_por = EXCLUDED.dado_de_alta_por, "
         "rol_al_registrar = EXCLUDED.rol_al_registrar",
-        (correo, nombre_referencia.strip(), area_departamento.strip(), fecha, dado_de_alta_por,
-         rol_al_registrar),
+        (correo, formatear_nombre_persona(nombre_referencia), area_departamento.strip(), fecha,
+         dado_de_alta_por, rol_al_registrar),
     )
     conn.commit()
     conn.close()
@@ -1424,8 +1451,8 @@ def registrar_persona(correo, nombre, area_departamento, nombre_supervisor, pass
         "password_salt = EXCLUDED.password_salt, "
         "fecha_registro = EXCLUDED.fecha_registro, "
         "rol = EXCLUDED.rol",
-        (correo, nombre.strip(), area_departamento.strip(), nombre_supervisor.strip(),
-         pass_hash, salt, fecha, rol),
+        (correo, formatear_nombre_persona(nombre), area_departamento.strip(),
+         formatear_nombre_persona(nombre_supervisor), pass_hash, salt, fecha, rol),
     )
     conn.commit()
     conn.close()
@@ -1738,6 +1765,12 @@ def crear_solicitud(solicitante, supervisor, area_departamento, items, db_path: 
     # parten en categorías distintas al graficar las estadísticas.
     area_departamento = (area_departamento or "").strip().upper()
     oficina = (oficina or "").strip().upper()
+    # Nombres de personas con formato uniforme (inicial en mayúscula, resto en
+    # minúscula) para que TODAS las solicitudes queden igual, sin importar si el
+    # nombre vino del registro o se tipeó a mano al crear/editar el pedido. Ver
+    # formatear_nombre_persona: respeta apellidos compuestos ("San Miguel").
+    solicitante = formatear_nombre_persona(solicitante)
+    supervisor = formatear_nombre_persona(supervisor)
 
     correlativo = siguiente_correlativo(db_path)
     folio = f"Solicitud-{correlativo}"
