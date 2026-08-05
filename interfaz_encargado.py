@@ -561,41 +561,44 @@ def panel_crear_alias():
     )
 
     # ---------------------------------------- ver / editar / eliminar existentes
-    st.markdown("### Alias ya creados")
-    st.caption(
-        "Los alias que se agregaron a mano. Corrija el texto de cualquiera y presione "
-        "«Guardar», o elimínelo con la ✕. (No se muestra el nombre propio de cada producto, "
-        "que ya es buscable por sí solo.)"
-    )
-    filtro_alias = st.text_input(
-        "Buscar alias o producto", key="alias_filtro",
-        placeholder="ej. confort, o parte del nombre del producto",
-    )
-    df_gestion = core.listar_alias_para_gestion(filtro=filtro_alias)
-    if df_gestion.empty:
-        st.info("No hay alias creados a mano que coincidan." if filtro_alias.strip()
-                else "Todavía no se ha creado ningún alias a mano.")
-    else:
-        st.caption(f"{len(df_gestion)} alias.")
-        for _, fila in df_gestion.iterrows():
-            ca, cb, cg, cc = st.columns([5, 4, 2, 1])
-            nuevo = ca.text_input(
-                "alias", value=fila["texto_alias"],
-                key=f"gest_ed_{fila['id']}", label_visibility="collapsed",
-            )
-            cb.caption(f"→ {fila['nombre_estandar']}  ·  {fila['codigo_producto']}")
-            if cg.button("Guardar", key=f"gest_btn_ed_{fila['id']}", width='stretch'):
-                ok, mensaje = core.editar_alias(int(fila["id"]), nuevo)
-                (st.success if ok else st.error)(mensaje)
-                if ok:
-                    st.rerun()
-            if cc.button("✕", key=f"gest_btn_del_{fila['id']}",
-                         help=f'Eliminar el alias "{fila["texto_alias"]}"'):
-                ok, mensaje = core.eliminar_alias(int(fila["id"]))
-                (st.success if ok else st.error)(mensaje)
-                if ok:
-                    st.rerun()
-            st.divider()
+    # Los alias ya creados van dentro de un desplegable colapsado por defecto:
+    # suelen ser muchos y, listados de golpe, obligaban a bajar bastante para
+    # llegar al formulario de crear uno nuevo.
+    with st.expander("Ver / editar alias ya creados"):
+        st.caption(
+            "Los alias que se agregaron a mano. Corrija el texto de cualquiera y presione "
+            "«Guardar», o elimínelo con la ✕. (No se muestra el nombre propio de cada producto, "
+            "que ya es buscable por sí solo.)"
+        )
+        filtro_alias = st.text_input(
+            "Buscar alias o producto", key="alias_filtro",
+            placeholder="ej. confort, o parte del nombre del producto",
+        )
+        df_gestion = core.listar_alias_para_gestion(filtro=filtro_alias)
+        if df_gestion.empty:
+            st.info("No hay alias creados a mano que coincidan." if filtro_alias.strip()
+                    else "Todavía no se ha creado ningún alias a mano.")
+        else:
+            st.caption(f"{len(df_gestion)} alias.")
+            for _, fila in df_gestion.iterrows():
+                ca, cb, cg, cc = st.columns([5, 4, 2, 1])
+                nuevo = ca.text_input(
+                    "alias", value=fila["texto_alias"],
+                    key=f"gest_ed_{fila['id']}", label_visibility="collapsed",
+                )
+                cb.caption(f"→ {fila['nombre_estandar']}  ·  {fila['codigo_producto']}")
+                if cg.button("Guardar", key=f"gest_btn_ed_{fila['id']}", width='stretch'):
+                    ok, mensaje = core.editar_alias(int(fila["id"]), nuevo)
+                    (st.success if ok else st.error)(mensaje)
+                    if ok:
+                        st.rerun()
+                if cc.button("✕", key=f"gest_btn_del_{fila['id']}",
+                             help=f'Eliminar el alias "{fila["texto_alias"]}"'):
+                    ok, mensaje = core.eliminar_alias(int(fila["id"]))
+                    (st.success if ok else st.error)(mensaje)
+                    if ok:
+                        st.rerun()
+                st.divider()
 
     st.divider()
     st.markdown("### Crear un nuevo alias para producto existente")
