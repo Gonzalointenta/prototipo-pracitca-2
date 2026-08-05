@@ -1635,9 +1635,11 @@ def actualizar_datos_persona(correo, nombre, area_departamento, nombre_superviso
     """
     db_path = db_path or DB_PATH
     correo = (correo or "").strip().lower()
-    nombre = (nombre or "").strip()
+    # Mismo formato uniforme de nombres que en el registro y en las solicitudes
+    # (inicial mayúscula, resto minúscula; respeta apellidos compuestos).
+    nombre = formatear_nombre_persona(nombre)
     area = (area_departamento or "").strip()
-    supervisor = (nombre_supervisor or "").strip()
+    supervisor = formatear_nombre_persona(nombre_supervisor)
     if not nombre:
         return False, "El nombre no puede quedar vacío."
     if not area:

@@ -230,6 +230,51 @@ def mostrar_sidebar_cuenta(identidad_sesion):
             st.rerun()
 
 
+def panel_mi_cuenta(identidad_sesion):
+    """Sección 'Mi Cuenta' en el área principal (app del encargado): reúne en un
+    solo lugar los datos de la cuenta, el cambio de contraseña y el cierre de
+    sesión, accesibles desde el mismo menú lateral que el resto de las secciones.
+    El correo se muestra pero no se edita: es el identificador de ingreso."""
+    if not identidad_sesion:
+        return
+    st.subheader("Mi Cuenta")
+    st.caption(f"Correo de acceso: **{identidad_sesion['correo']}**  ·  "
+               "es tu identificador de ingreso y no se edita desde aquí.")
+
+    with st.expander("Editar mis datos", expanded=True):
+        nombre = st.text_input(
+            "Nombre completo", value=identidad_sesion.get("nombre") or "", key="mc_nombre")
+        area = st.text_input(
+            "Área / Departamento", value=identidad_sesion.get("area_departamento") or "",
+            key="mc_area")
+        supervisor = st.text_input(
+            "Supervisor / jefatura", value=identidad_sesion.get("nombre_supervisor") or "",
+            key="mc_sup")
+        st.caption("La oficina no se guarda en la cuenta: se elige en cada solicitud.")
+        if st.button("Guardar datos", key="mc_btn_guardar_datos"):
+            ok_d, msg_d = core.actualizar_datos_persona(
+                identidad_sesion["correo"], nombre, area, supervisor)
+            if ok_d:
+                st.success(msg_d)
+                st.rerun()
+            else:
+                st.error(msg_d)
+
+    with st.expander("Cambiar contraseña"):
+        actual = st.text_input("Contraseña actual", type="password", key="mc_pass_actual")
+        nueva1 = st.text_input("Nueva contraseña", type="password", key="mc_pass_nueva1")
+        nueva2 = st.text_input("Repetir nueva contraseña", type="password", key="mc_pass_nueva2")
+        if st.button("Actualizar contraseña", key="mc_btn_pass"):
+            ok_pass, msg_pass = core.cambiar_password(
+                identidad_sesion["correo"], actual, nueva1, nueva2)
+            (st.success if ok_pass else st.error)(msg_pass)
+
+    st.divider()
+    if st.button("Cerrar sesión", width='stretch', key="mc_btn_logout"):
+        cerrar_sesion()
+        st.rerun()
+
+
 # =====================================================================
 #  VISTA SOLICITANTE (comun a ambos roles: el encargado tambien puede
 #  generar solicitudes en nombre de alguien que llama por telefono, etc.)
