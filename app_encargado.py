@@ -208,29 +208,26 @@ etiquetas_tabs = [
 if es_admin:
     etiquetas_tabs.append("Gestionar accesos")
 
-tabs = st.tabs(etiquetas_tabs)
-with tabs[0]:
-    panel_nueva_solicitud(es_encargado=True)
-with tabs[1]:
-    panel_solicitudes_activas()
-with tabs[2]:
-    panel_pedidos_completados()
-with tabs[3]:
-    panel_inventario_general()
-with tabs[4]:
-    panel_inventario_critico()
-with tabs[5]:
-    panel_importar_saldos()
-with tabs[6]:
-    panel_historial()
-with tabs[7]:
-    panel_estadisticas()
-with tabs[8]:
-    panel_crear_alias()
-with tabs[9]:
-    panel_correos_autorizados()
-with tabs[10]:
-    panel_sync_smc()
-if es_admin:
-    with tabs[11]:
-        panel_gestion_accesos()
+# Navegación por la barra lateral: se ejecuta y renderiza SOLO la sección
+# elegida. Antes esto era st.tabs, que corre el código de las 11-12 pestañas en
+# CADA rerun (cada tecla/clic), disparando las consultas de todos los paneles a
+# la vez contra Supabase (~85 ms cada una) y generando el lag. Con un radio en
+# la barra lateral corre un único panel por interacción.
+_PANELES = {
+    "Nueva solicitud": lambda: panel_nueva_solicitud(es_encargado=True),
+    "Solicitudes activas": panel_solicitudes_activas,
+    "Pedidos completados": panel_pedidos_completados,
+    "Inventario general": panel_inventario_general,
+    "Inventario crítico": panel_inventario_critico,
+    "Actualizar saldos": panel_importar_saldos,
+    "Historial": panel_historial,
+    "Estadísticas": panel_estadisticas,
+    "Crear alias": panel_crear_alias,
+    "Correos autorizados": panel_correos_autorizados,
+    "Sincronización SMC": panel_sync_smc,
+    "Gestionar accesos": panel_gestion_accesos,
+}
+
+st.sidebar.divider()
+seccion = st.sidebar.radio("Ir a la sección", etiquetas_tabs, key="seccion_encargado")
+_PANELES[seccion]()
