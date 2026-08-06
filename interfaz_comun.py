@@ -284,13 +284,14 @@ def color_coincidencia(score):
     """
     Color según qué tan segura es la coincidencia:
       100%      -> se marca con estrella (es el producto exacto)
-      60 a 99%  -> verde    (coincidencia buena)
-      45 a 59%  -> amarillo (dudosa, conviene revisar)
-      menos 45% -> rojo     (muy probablemente no es lo que busca)
+      76 a 99%  -> verde    (coincidencia buena)
+      60 a 75%  -> amarillo (dudosa, conviene revisar)
+      45 a 59%  -> rojo     (muy probablemente no es lo que busca)
+      menos 45% -> no aparece (lo filtra el buscador, umbral 45)
     """
-    if score >= 60:
+    if score >= 76:
         return "green"
-    if score >= 45:
+    if score >= 60:
         return "yellow"
     return "red"
 
@@ -628,9 +629,10 @@ def panel_nueva_solicitud(es_encargado: bool, identidad: dict = None):
     busqueda = st.text_input("Busque el producto que desea", key=f"busqueda_input_{n}")
 
     if busqueda:
-        # umbral bajo a propósito: así también se ven las coincidencias malas
-        # pintadas en rojo, en vez de esconderlas y dejar la pantalla vacía.
-        candidatos = core.buscar_producto(busqueda, umbral=35, limite=7)
+        # Se muestran hasta 5 coincidencias y se corta en 45%: con la carga
+        # masiva del catálogo maestro, bajar de ahí solo agregaba ruido. Debajo
+        # de 45% no aparece nada.
+        candidatos = core.buscar_producto(busqueda, umbral=45, limite=5)
         if candidatos:
             opciones = [
                 etiqueta_candidato(nombre, score, codigo if es_encargado else None)

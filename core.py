@@ -255,7 +255,8 @@ ESQUEMA_SQL = \
             ubicacion TEXT,
             fecha_venc TEXT,
             lote TEXT,
-            activo INTEGER DEFAULT 1
+            activo INTEGER DEFAULT 1,
+            historico INTEGER DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS alias_productos (
@@ -417,6 +418,12 @@ def init_db(db_path: str = None) -> None:
         "ALTER TABLE productos ADD COLUMN valor_unitario REAL DEFAULT 0",
         "ALTER TABLE solicitud_detalle ADD COLUMN valor_movimiento REAL",
         "ALTER TABLE correos_autorizados ADD COLUMN rol_al_registrar TEXT",
+        # historico=1: código del catálogo maestro (SMC) cargado como referencia.
+        # Es BUSCABLE (para pedir cosas que están físicas pero descuadradas en el
+        # sistema) pero se EXCLUYE del inventario general y crítico, porque no
+        # tiene stock real. Se "gradúa" a historico=0 cuando el escaneo SMC le
+        # trae saldo (ver importar_saldos_smc).
+        "ALTER TABLE productos ADD COLUMN historico INTEGER DEFAULT 0",
     ]
     for sql in migraciones:
         try:
@@ -2160,7 +2167,7 @@ def listar_inventario_general(db_path: str = None) -> pd.DataFrame:
             """
             SELECT codigo, nombre_estandar, categoria, unidad_medida, saldo, valor_saldo
             FROM productos
-            WHERE activo = 1
+            WHERE activo = 1 AND historico = 0
             ORDER BY categoria, nombre_estandar
             """,
             conn,
@@ -2184,7 +2191,7 @@ def valor_total_inventario(db_path: str = None) -> int:
         # total de decenas de millones pierde algunos pesos. Cada valor por
         # producto sí es exacto, así que sumarlos en Python da el total exacto.
         valores = conn.execute(
-            "SELECT valor_saldo FROM productos WHERE activo = 1"
+            "SELECT valor_saldo FROM productos WHERE activo = 1 AND historico = 0"
         ).fetchall()
         conn.close()
         total = sum(float(v[0]) for v in valores if v[0] is not None)
@@ -2205,7 +2212,8 @@ def listar_stock_critico(db_path: str = None) -> pd.DataFrame:
             SELECT codigo, nombre_estandar, categoria, unidad_medida, saldo, stock_critico,
                    CASE WHEN saldo <= 0 THEN 'AGOTADO' ELSE 'BAJO CRÍTICO' END AS urgencia
             FROM productos
-            WHERE activo = 1 AND (saldo <= 0 OR (stock_critico > 0 AND saldo < stock_critico))
+            WHERE activo = 1 AND historico = 0
+                  AND (saldo <= 0 OR (stock_critico > 0 AND saldo < stock_critico))
             ORDER BY (saldo <= 0) DESC, saldo ASC
             """,
             conn,
@@ -2956,7 +2964,11 @@ def importar_saldos_smc(ruta_archivo, db_path: str = None, fecha_corte=None):
                                 else "Salida registrada fuera de este sistema"),
             })
 
-        campos = ["saldo=?", "saldo_importado=?", "fecha_corte=?"]
+        # Al llegar en el listado de SMC, el producto tiene stock real: se
+        # "gradúa" (historico=0) para que aparezca en el inventario. Los códigos
+        # del catálogo maestro que NO estén en SMC siguen historico=1 (buscables
+        # pero fuera del inventario).
+        campos = ["saldo=?", "saldo_importado=?", "fecha_corte=?", "historico=0"]
         valores = [saldo_nuevo, saldo_nuevo, fecha]
         if critico_nuevo is not None:
             campos.append("stock_critico=?")
