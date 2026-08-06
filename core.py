@@ -1364,17 +1364,25 @@ def importar_correos_desde_excel(ruta_archivo, db_path: str = None) -> pd.DataFr
 
 def siguiente_correlativo(db_path: str = None) -> int:
     """
-    Número correlativo del formulario físico. Parte en CORRELATIVO_INICIAL
-    (2900) para no chocar con el talonario en papel que va en 2798, y avanza
-    de uno en uno. Cuando se consigan los datos históricos reales, basta con
-    cambiar ese número inicial o cargar los folios antiguos.
+    Número correlativo del formulario físico. Avanza de uno en uno como
+    MAX(correlativo)+1, pero nunca por debajo de un PISO.
+
+    El piso es configurable: si existe la clave 'correlativo_minimo' en la tabla
+    configuracion, se usa ese valor. Sirve para SALTAR a un número —p.ej. cuando
+    el talonario real se saltó un folio— sin tocar código: basta
+    guardar_config('correlativo_minimo', '3033') y el próximo pedido tomará 3033
+    aunque el MAX actual sea menor. Si no hay piso configurado, se usa
+    CORRELATIVO_INICIAL (2900), pensado para no chocar con el talonario en papel
+    que iba en 2798.
     """
     db_path = db_path or DB_PATH
     conn = get_connection(db_path)
     maximo = conn.execute("SELECT MAX(correlativo) FROM solicitudes").fetchone()[0]
     conn.close()
-    if maximo is None or maximo < CORRELATIVO_INICIAL:
-        return CORRELATIVO_INICIAL
+    piso_cfg = leer_config("correlativo_minimo", "", db_path)
+    piso = int(piso_cfg) if str(piso_cfg).strip().isdigit() else CORRELATIVO_INICIAL
+    if maximo is None or maximo < piso:
+        return piso
     return int(maximo) + 1
 
 
