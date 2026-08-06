@@ -32,13 +32,21 @@ jobs:
               pagina = navegador.new_page()
               pagina.goto(URL, wait_until="load", timeout=60000)
               try:
-                  boton = pagina.get_by_role("button", name=re.compile(r"back up", re.IGNORECASE))
-                  if boton.count() > 0:
-                      print("Estaba dormida: apretando el boton.")
-                      boton.first.click(timeout=8000)
+                  print("Estado inicial:", (pagina.inner_text("body") or "").replace("\n", " ")[:120])
+              except Exception:
+                  pass
+              desperto = False
+              try:
+                  pagina.get_by_role("button", name=re.compile(r"back up", re.IGNORECASE)).first.click(timeout=25000)
+                  print("Boton de despertar CLICKEADO.")
+                  desperto = True
               except Exception as e:
-                  print("(sin boton de despertar:", e, ")")
-              pagina.wait_for_timeout(60000)
+                  print("(no habia boton de despertar; ya estaba despierta o no aparecio:", str(e)[:80], ")")
+              pagina.wait_for_timeout(90000 if desperto else 15000)
+              try:
+                  print("Estado final:", (pagina.inner_text("body") or "").replace("\n", " ")[:120])
+              except Exception:
+                  pass
               navegador.close()
-          print("Listo: la app quedo activada.")
+          print("Listo.")
           PY
