@@ -2968,6 +2968,180 @@ def importar_saldos_smc(ruta_archivo, db_path: str = None, fecha_corte=None):
 
 
 # ============================================================================
+#  CARGA DE SOLICITUDES HISTÓRICAS DESDE EL EXCEL DE LA BODEGA
+# ============================================================================
+#
+# El encargado lleva a mano un Excel ("control bodega - <año>.xlsx") con una
+# hoja por mes y columnas FECHA/ARTICULO/CANTIDAD/RETIRADO POR/AUTORIZADO POR/
+# UNIDAD/OBSERVACIONES: una fila por producto, con los pedidos agrupados por
+# comillas (" = "lo mismo de la fila de arriba"). A veces registra ahí pedidos
+# reales antes de pasarlos al sistema; hacerlos por la app les pondría la fecha
+# de hoy, así que se cargan como HISTÓRICOS: cerrados, tratados por "Cillanes"
+# y SIN tocar stock (el saldo real ya lo trae la importación de SMC), con la
+# fecha real del Excel. Para no duplicar, se cargan solo los pedidos con fecha
+# POSTERIOR al último histórico ya cargado (ver fecha_ultimo_historico).
+
+USUARIO_HISTORICO = "Cillanes"
+UMBRAL_MATCH_AUTO = 88  # score de buscar_producto para aceptar el match sin revisión
+
+_MAPEO_COLUMNAS_HIST = {
+    "fecha": "fecha", "articulo": "articulo", "cantidad": "cantidad",
+    "retirado por": "solicitante", "autorizado por": "supervisor",
+    "unidad": "departamento", "observaciones": "oficina",
+}
+
+
+def fecha_ultimo_historico(db_path: str = None):
+    """Fecha del último pedido histórico ya cargado (marca: usuario_operacion =
+    'Cillanes'). Sirve de corte para no volver a importar lo mismo. None si aún
+    no hay ninguno."""
+    db_path = db_path or DB_PATH
+    conn = get_connection(db_path)
+    fila = conn.execute(
+        "SELECT MAX(fecha_solicitud) FROM solicitudes WHERE usuario_operacion = ?",
+        (USUARIO_HISTORICO,),
+    ).fetchone()
+    conn.close()
+    return fila[0] if fila else None
+
+
+def leer_pedidos_historicos_excel(ruta_archivo):
+    """
+    Parsea el Excel de la bodega y devuelve una lista de pedidos. Cada pedido es
+    {fecha (str 'YYYY-MM-DD HH:MM'), fecha_dt (datetime), solicitante,
+    supervisor, departamento, oficina, hoja, articulos:[{texto, cantidad}]}.
+    Recorre todas las hojas; ignora las que no tengan un encabezado con FECHA y
+    ARTICULO. Una fila cuya FECHA es una fecha real ABRE un pedido nuevo; las
+    filas siguientes con comillas/blanco en FECHA son del mismo pedido.
+    """
+    xl = pd.ExcelFile(ruta_archivo)
+    pedidos = []
+    for hoja in xl.sheet_names:
+        crudo = xl.parse(hoja, header=None)
+        fila_enc = None
+        for i in range(min(15, len(crudo))):
+            vals = [str(v).strip().lower() for v in crudo.iloc[i].tolist()]
+            if "fecha" in vals and "articulo" in vals:
+                fila_enc = i
+                break
+        if fila_enc is None:
+            continue
+        encabezados = [str(v).strip().lower() for v in crudo.iloc[fila_enc].tolist()]
+        col = {}
+        for idx, h in enumerate(encabezados):
+            if h in _MAPEO_COLUMNAS_HIST:
+                col[_MAPEO_COLUMNAS_HIST[h]] = idx
+        if "fecha" not in col or "articulo" not in col:
+            continue
+
+        def _celda(fila, campo):
+            if campo in col and col[campo] < len(fila):
+                v = fila.iloc[col[campo]]
+                return "" if pd.isna(v) else str(v).strip()
+            return ""
+
+        actual = None
+        for r in range(fila_enc + 1, len(crudo)):
+            fila = crudo.iloc[r]
+            fval = fila.iloc[col["fecha"]] if col["fecha"] < len(fila) else None
+            if isinstance(fval, (pd.Timestamp, datetime)):  # abre pedido nuevo
+                ts = pd.Timestamp(fval)
+                actual = {
+                    "fecha_dt": ts.to_pydatetime(),
+                    "fecha": ts.strftime("%Y-%m-%d %H:%M"),
+                    "solicitante": _celda(fila, "solicitante"),
+                    "supervisor": _celda(fila, "supervisor"),
+                    "departamento": _celda(fila, "departamento"),
+                    "oficina": _celda(fila, "oficina"),
+                    "hoja": hoja,
+                    "articulos": [],
+                }
+                pedidos.append(actual)
+            art_txt = _celda(fila, "articulo")
+            if actual is not None and art_txt and art_txt != '"':
+                cruda = fila.iloc[col["cantidad"]] if "cantidad" in col and col["cantidad"] < len(fila) else None
+                try:
+                    cant = float(cruda)
+                except (TypeError, ValueError):
+                    cant = 0
+                actual["articulos"].append({"texto": art_txt, "cantidad": cant})
+    return [p for p in pedidos if p["articulos"]]
+
+
+def preparar_importacion_historica(ruta_archivo, db_path: str = None):
+    """
+    Lee el Excel, se queda con los pedidos POSTERIORES al último histórico
+    cargado (orden cronológico) y hace el match difuso de cada artículo al
+    catálogo. Devuelve {'cutoff', 'pedidos'}: cada artículo trae 'candidatos'
+    (lista (codigo, nombre, score)), un 'codigo'/'nombre_match' sugeridos y un
+    flag 'revision' (True si el mejor match no llega al umbral y conviene que el
+    encargado lo resuelva a mano). No escribe nada.
+    """
+    db_path = db_path or DB_PATH
+    cutoff = fecha_ultimo_historico(db_path)
+    cutoff_dt = pd.Timestamp(cutoff).to_pydatetime() if cutoff else None
+    todos = leer_pedidos_historicos_excel(ruta_archivo)
+    nuevos = [p for p in todos if cutoff_dt is None or p["fecha_dt"] > cutoff_dt]
+    nuevos.sort(key=lambda p: p["fecha_dt"])
+    for p in nuevos:
+        for a in p["articulos"]:
+            cands = buscar_producto(a["texto"], db_path=db_path, limite=5)
+            a["candidatos"] = cands
+            if cands and cands[0][2] >= UMBRAL_MATCH_AUTO:
+                a["codigo"], a["nombre_match"], a["revision"] = cands[0][0], cands[0][1], False
+            else:
+                a["codigo"] = cands[0][0] if cands else None
+                a["nombre_match"] = cands[0][1] if cands else None
+                a["revision"] = True
+    return {"cutoff": cutoff, "pedidos": nuevos}
+
+
+def importar_pedidos_historicos(pedidos, db_path: str = None):
+    """
+    Graba los pedidos ya resueltos (cada artículo con su 'codigo' final) como
+    solicitudes CERRADAS, tratadas por 'Cillanes' y SIN tocar stock, en orden
+    cronológico y con folios correlativos consecutivos (respetando el piso). Los
+    nombres se guardan con formato uniforme y depto/oficina en MAYÚSCULAS, igual
+    que crear_solicitud. Devuelve la lista de folios creados. Un artículo sin
+    'codigo' se omite (no debería pasar tras la revisión).
+    """
+    db_path = db_path or DB_PATH
+    conn = get_connection(db_path)
+    creados = []
+    for p in sorted(pedidos, key=lambda x: x["fecha_dt"]):
+        corr = siguiente_correlativo(db_path)
+        folio = f"Solicitud-{corr}"
+        cur = conn.execute(
+            "INSERT INTO solicitudes (folio, fecha_solicitud, solicitante, supervisor, "
+            "area_departamento, estado, correlativo, oficina, usuario_operacion) "
+            "VALUES (?, ?, ?, ?, ?, 'cerrada', ?, ?, ?) RETURNING id",
+            (folio, p["fecha"], formatear_nombre_persona(p["solicitante"]),
+             formatear_nombre_persona(p["supervisor"]),
+             (p["departamento"] or "").strip().upper(), corr,
+             (p["oficina"] or "").strip().upper(), USUARIO_HISTORICO),
+        )
+        solicitud_id = cur.fetchone()[0]
+        for a in p["articulos"]:
+            codigo = a.get("codigo")
+            if not codigo:
+                continue
+            cant = formatear_cantidad(a["cantidad"])
+            unitario = conn.execute(
+                "SELECT COALESCE(valor_unitario, 0) FROM productos WHERE codigo=?", (codigo,)
+            ).fetchone()[0]
+            conn.execute(
+                "INSERT INTO solicitud_detalle (solicitud_id, codigo_producto, cantidad_solicitada, "
+                "cantidad_entregada, valor_movimiento, mensaje_sistema) VALUES (?, ?, ?, ?, ?, '')",
+                (solicitud_id, codigo, cant, cant, float(unitario or 0) * cant),
+            )
+        conn.commit()
+        creados.append(folio)
+    conn.close()
+    invalidar_cache_lecturas()
+    return creados
+
+
+# ============================================================================
 #  LECTURA POR OCR DE UN PDF ESCANEADO (papel -> escaneo -> saldos)
 # ============================================================================
 #

@@ -913,6 +913,106 @@ def panel_importar_saldos():
         st.info("No se detectó ninguna fila reconocible en el PDF.")
 
 
+def _opciones_resolucion(articulo):
+    """Menú de resolución para un artículo dudoso: candidatos del catálogo +
+    crear nuevo + omitir. Devuelve dict {etiqueta: valor}."""
+    opciones = {f"{nom}  ·  {cod}  ({sc:.0f}%)": cod
+                for cod, nom, sc in articulo["candidatos"]}
+    opciones["➕ Crear producto nuevo con este nombre"] = "__nuevo__"
+    opciones["🚫 Omitir este artículo (no cargarlo)"] = "__omitir__"
+    return opciones
+
+
+def panel_cargar_historicas():
+    st.subheader("Cargar solicitudes históricas")
+    st.caption(
+        "Sube el Excel de la bodega (control bodega - <año>.xlsx). Se cargan los pedidos con "
+        "fecha POSTERIOR al último histórico ya cargado, como CERRADOS, tratados por «Cillanes» "
+        "y SIN tocar stock, con su fecha real. Útil para pedidos anotados a mano que por la app "
+        "quedarían con la fecha de hoy."
+    )
+    if st.session_state.get("hist_msg"):
+        st.success(st.session_state.hist_msg)
+        st.session_state.hist_msg = None
+
+    cutoff = core.fecha_ultimo_historico()
+    st.info(f"Último histórico cargado: **{cutoff or '—'}**. Se importará lo posterior a esa fecha.")
+
+    archivo = st.file_uploader("Excel de la bodega (.xlsx)", type=["xlsx"], key="upload_hist")
+    if archivo is not None and st.button("Analizar Excel", key="btn_analizar_hist"):
+        try:
+            st.session_state.hist_prep = core.preparar_importacion_historica(archivo)
+        except Exception as e:
+            st.session_state.hist_prep = None
+            st.error(f"No se pudo leer el Excel: {e}")
+        st.rerun()
+
+    prep = st.session_state.get("hist_prep")
+    if not prep:
+        return
+    pedidos = prep["pedidos"]
+    if not pedidos:
+        st.success("No hay pedidos nuevos para cargar: el sistema ya está al día con el Excel.")
+        return
+
+    n_rev = sum(1 for p in pedidos for a in p["articulos"] if a["revision"])
+    st.markdown(f"### {len(pedidos)} pedido(s) nuevo(s) para cargar")
+    if n_rev:
+        st.warning(f"⚠️ {n_rev} artículo(s) con match dudoso: elegí el producto correcto abajo "
+                   "(o crealo / omitilo). Los que tienen ✅ ya matchearon solos.")
+
+    for i, p in enumerate(pedidos):
+        with st.container(border=True):
+            st.markdown(f"**{p['fecha'][:10]}**  ·  {p['solicitante'] or '(sin solicitante)'}"
+                        f"  ·  {p['departamento'] or '—'}")
+            st.caption(f"Autoriza: {p['supervisor'] or '—'}  ·  Oficina: {p['oficina'] or '—'}")
+            for j, a in enumerate(p["articulos"]):
+                cant = core.formatear_cantidad(a["cantidad"])
+                if not a["revision"]:
+                    st.markdown(f"- {a['texto']} × {cant} → ✅ **{a['nombre_match']}**")
+                else:
+                    st.markdown(f"- {a['texto']} × {cant} → ⚠️")
+                    st.selectbox(
+                        f"Producto para «{a['texto']}»", list(_opciones_resolucion(a).keys()),
+                        key=f"hist_sel_{i}_{j}", label_visibility="collapsed",
+                    )
+
+    if st.button("Confirmar e importar todo", type="primary", key="btn_importar_hist"):
+        resueltos = []
+        for i, p in enumerate(pedidos):
+            arts_ok = []
+            for j, a in enumerate(p["articulos"]):
+                if not a["revision"]:
+                    arts_ok.append({**a, "codigo": a["codigo"]})
+                    continue
+                opciones = _opciones_resolucion(a)
+                elegido = opciones.get(st.session_state.get(f"hist_sel_{i}_{j}"))
+                if elegido == "__omitir__" or not elegido:
+                    continue
+                if elegido == "__nuevo__":
+                    try:
+                        elegido = core.crear_producto_manual(a["texto"])
+                    except ValueError:
+                        # ya existe un producto con ese nombre: usar el existente
+                        cands = core.buscar_producto(a["texto"], limite=1)
+                        elegido = cands[0][0] if cands else None
+                    if not elegido:
+                        continue
+                arts_ok.append({**a, "codigo": elegido})
+            if arts_ok:
+                resueltos.append({**p, "articulos": arts_ok})
+
+        if not resueltos:
+            st.error("No quedó ningún pedido con artículos para cargar.")
+        else:
+            creados = core.importar_pedidos_historicos(resueltos)
+            st.session_state.hist_prep = None
+            st.session_state.hist_msg = (
+                f"Cargados {len(creados)} pedido(s): {', '.join(creados)}. "
+                "Quedaron cerrados, tratados por Cillanes, con su fecha real.")
+            st.rerun()
+
+
 def panel_estadisticas():
     st.subheader("Estadísticas de consumo")
     st.caption(

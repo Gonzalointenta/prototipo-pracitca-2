@@ -40,6 +40,7 @@ from interfaz_comun import (
     panel_nueva_solicitud,
 )
 from interfaz_encargado import (
+    panel_cargar_historicas,
     panel_correos_autorizados,
     panel_crear_alias,
     panel_estadisticas,
@@ -199,7 +200,7 @@ etiquetas_tabs = [
     "Nueva solicitud", "Solicitudes activas", "Pedidos completados",
     "Inventario general", "Inventario crítico", "Actualizar saldos",
     "Historial", "Estadísticas", "Crear alias", "Correos autorizados",
-    "Sincronización SMC",
+    "Sincronización SMC", "Cargar históricas",
 ]
 if es_admin:
     etiquetas_tabs.append("Gestionar accesos")
@@ -223,6 +224,7 @@ _PANELES = {
     "Crear alias": panel_crear_alias,
     "Correos autorizados": panel_correos_autorizados,
     "Sincronización SMC": panel_sync_smc,
+    "Cargar históricas": panel_cargar_historicas,
     "Gestionar accesos": panel_gestion_accesos,
     "Mi Cuenta": lambda: panel_mi_cuenta(identidad_sesion),
 }
