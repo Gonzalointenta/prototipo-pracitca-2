@@ -2307,6 +2307,24 @@ def _filtro_fechas_sql(desde, hasta):
 
 def estadisticas_consumo(desde=None, hasta=None, solo_cerradas=True, db_path: str = None):
     """
+    Versión CACHEADA de las estadísticas de consumo (ver _estadisticas_consumo_calc).
+    Son ~6 consultas de agregación (GROUP BY sobre solicitudes+detalle) que el
+    panel de Estadísticas pedía en cada rerun —incluso al mover un slider que no
+    cambia el período—; se cachean con el mismo TTL corto que el inventario, con
+    la clave incluyendo los parámetros (desde/hasta/solo_cerradas). Se invalida
+    solo con invalidar_cache_lecturas (al cerrar/anular/importar solicitudes o
+    tocar stock), así el cambio se ve al instante sin esperar el TTL.
+    """
+    db_path = db_path or DB_PATH
+    clave = ("estadisticas_consumo", str(desde), str(hasta), bool(solo_cerradas), db_path)
+    return _leer_cacheado(
+        clave,
+        lambda: _estadisticas_consumo_calc(desde, hasta, solo_cerradas, db_path),
+    )
+
+
+def _estadisticas_consumo_calc(desde=None, hasta=None, solo_cerradas=True, db_path: str = None):
+    """
     Devuelve un diccionario de DataFrames con el consumo agregado, para las
     gráficas del panel de estadísticas.
 
