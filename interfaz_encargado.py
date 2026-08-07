@@ -527,7 +527,10 @@ def panel_historial():
             continue
         st.markdown(f"##### {periodo}  ·  {len(grupo)} en esta página")
         for _, fila in grupo.iterrows():
-            etiqueta = (f'N° {fila["correlativo"]}  ·  {fila["solicitante"]}  ·  '
+            # Se muestra el folio REAL de SMC si está asignado; si no, el
+            # correlativo interno (la clave 'folio' se usa solo para expandir).
+            folio_mostrar = str(fila.get("folio_real") or "").strip() or fila["correlativo"]
+            etiqueta = (f'N° {folio_mostrar}  ·  {fila["solicitante"]}  ·  '
                         f'{fila["fecha_solicitud"]}')
             with st.expander(etiqueta):
                 c1, c2, c3, c4 = st.columns(4)

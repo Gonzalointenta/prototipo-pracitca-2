@@ -336,7 +336,8 @@ ESQUEMA_SQL = \
             oficina TEXT,
             usuario_operacion TEXT,
             info_adicional TEXT,
-            depto_origen TEXT
+            depto_origen TEXT,
+            folio_real TEXT
         );
 
         -- Parámetros que el encargado ajusta desde la interfaz y deben
@@ -415,6 +416,9 @@ def init_db(db_path: str = None) -> None:
         "ALTER TABLE solicitudes ADD COLUMN memo TEXT",
         "ALTER TABLE solicitudes ADD COLUMN tipo_movimiento TEXT",
         "ALTER TABLE solicitudes ADD COLUMN destino TEXT",
+        # Folio REAL de SMC, asignado a mano por el encargado (SMC salta números
+        # por los vales de gas). Solo se usa desde FOLIO_MANUAL_DESDE en adelante.
+        "ALTER TABLE solicitudes ADD COLUMN folio_real TEXT",
         "ALTER TABLE productos ADD COLUMN valor_unitario REAL DEFAULT 0",
         "ALTER TABLE solicitud_detalle ADD COLUMN valor_movimiento REAL",
         "ALTER TABLE correos_autorizados ADD COLUMN rol_al_registrar TEXT",
@@ -2477,7 +2481,7 @@ def historial_filtrado(desde=None, hasta=None, solicitante=None, area=None, ofic
     conn = get_connection(db_path)
     df = pd.read_sql(
         f"""
-        SELECT s.folio, s.correlativo, s.fecha_solicitud, s.solicitante,
+        SELECT s.folio, s.correlativo, s.folio_real, s.fecha_solicitud, s.solicitante,
                s.area_departamento, s.oficina, s.supervisor, s.estado,
                COUNT(d.id) AS n_productos,
                COALESCE(SUM(d.cantidad_solicitada), 0) AS total_unidades
@@ -2761,6 +2765,17 @@ def guardar_destino(folio, texto, db_path: str = None):
     conn.close()
 
 
+def guardar_folio_real(folio, valor, db_path: str = None):
+    """Guarda el folio REAL de SMC que el encargado asigna a mano (ver
+    formato_impresion.numero_folio_impreso). Va impreso en el comprobante."""
+    db_path = db_path or DB_PATH
+    conn = get_connection(db_path)
+    conn.execute("UPDATE solicitudes SET folio_real=? WHERE folio=?",
+                 ((valor or "").strip(), folio))
+    conn.commit()
+    conn.close()
+
+
 def datos_para_impresion(folio, db_path: str = None):
     """
     Devuelve (cabecera: dict, items: list[dict]) con todo lo necesario para
@@ -2772,7 +2787,7 @@ def datos_para_impresion(folio, db_path: str = None):
         "SELECT folio, correlativo, fecha_solicitud, solicitante, supervisor, "
         "       area_departamento, estado, correo_solicitante, correo_supervisor, "
         "       oficina, usuario_operacion, info_adicional, depto_origen, "
-        "       memo, tipo_movimiento, destino "
+        "       memo, tipo_movimiento, destino, folio_real "
         "FROM solicitudes WHERE folio = ?",
         (folio,),
     ).fetchone()
@@ -2810,6 +2825,7 @@ def datos_para_impresion(folio, db_path: str = None):
     cabecera["memo"] = cab[13] or ""
     cabecera["tipo_movimiento"] = cab[14] or ""
     cabecera["destino"] = cab[15] or ""
+    cabecera["folio_real"] = cab[16] or ""
     items = [
         {
             "codigo": f[0], "producto": f[1], "unidad": f[2],
@@ -3554,7 +3570,9 @@ def exportar_historial_excel(ruta: str = None, carpeta_pdf: str = "formularios",
     conn = get_connection(db_path)
     detalle = pd.read_sql(
         """
-        SELECT s.correlativo AS "N", s.folio, s.fecha_solicitud AS fecha,
+        SELECT s.correlativo AS "N",
+               COALESCE(NULLIF(s.folio_real, ''), s.folio) AS folio,
+               s.fecha_solicitud AS fecha,
                s.solicitante, s.area_departamento AS departamento, s.oficina,
                s.supervisor, s.usuario_operacion AS entregado_por,
                p.codigo, p.nombre_estandar AS producto, p.categoria,

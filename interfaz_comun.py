@@ -366,9 +366,23 @@ def boton_imprimir(folio, sufijo_key="", solo_comprobante=False, editable=True):
 
     correlativo = cabecera.get("correlativo")
 
+    es_folio_manual = (correlativo or 0) >= formato_impresion.FOLIO_MANUAL_DESDE
+
     if solo_comprobante and editable:
         st.markdown("**Datos editables del comprobante**")
         st.caption("Revise o corrija antes de descargar; sale impreso tal cual.")
+
+        # Folio REAL de SMC (desde FOLIO_MANUAL_DESDE en adelante): el encargado
+        # lo asigna a mano porque SMC salta números por los vales de gas, así que
+        # el correlativo del sistema no coincide con el talonario físico.
+        folio_real = cabecera.get("folio_real") or ""
+        if es_folio_manual:
+            folio_real = st.text_input(
+                "N° de folio (SMC)", value=folio_real,
+                key=f"foliorel_{folio}_{sufijo_key}",
+                placeholder="escriba el folio real del talonario físico",
+            )
+            cabecera["folio_real"] = folio_real
 
         # El área que escribe el solicitante suele ser el nombre corto
         # ("FINANZAS") y no el nombre formal de la dirección de origen
@@ -408,6 +422,8 @@ def boton_imprimir(folio, sufijo_key="", solo_comprobante=False, editable=True):
             core.guardar_memo(folio, memo)
             core.guardar_tipo_movimiento(folio, tipo_mov)
             core.guardar_destino(folio, destino)
+            if es_folio_manual:
+                core.guardar_folio_real(folio, folio_real)
             st.success("Cambios guardados.")
             st.rerun()
 
@@ -430,8 +446,13 @@ def boton_imprimir(folio, sufijo_key="", solo_comprobante=False, editable=True):
     else:
         ruta = CARPETA_PDF / f"solicitud_{correlativo}.pdf"
         formato_impresion.generar_solicitud_pdf(ruta, cabecera, items)
-        etiqueta = f"Imprimir solicitud n° {correlativo}"
-        nombre_archivo = f"solicitud_{correlativo}.pdf"
+        etiqueta = "Imprimir solicitud"
+        # El archivo se nombra por FECHA (no por el correlativo interno, que ya
+        # no es el folio real): "solicitud insumos DD-MM-AA.pdf". En disco sigue
+        # único por correlativo para no pisarse.
+        _f = str(cabecera.get("fecha_solicitud") or "")[:10].split("-")
+        _fecha = f"{_f[2]}-{_f[1]}-{_f[0][2:]}" if len(_f) == 3 else "s-fecha"
+        nombre_archivo = f"solicitud insumos {_fecha}.pdf"
 
     if MODO_ESCRITORIO:
         # La app corre en una ventana nativa (pywebview), no en un navegador

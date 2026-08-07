@@ -99,6 +99,31 @@ def _fecha_legible(fecha_texto):
         return str(fecha_texto or "")
 
 
+# Desde este correlativo, el folio impreso ya NO es el correlativo interno del
+# sistema, sino el folio REAL de SMC que el encargado asigna a mano (SMC comparte
+# el contador con el sistema de vales de gas y salta números, así que el
+# correlativo automático no coincide con el papel). En la solicitud sale en
+# blanco (se llena a mano); en el comprobante lo escribe el encargado antes de
+# imprimir. Las anteriores (< este número) siguen mostrando su correlativo.
+FOLIO_MANUAL_DESDE = 3035
+
+
+def numero_folio_impreso(cabecera):
+    """Número que va en el recuadro N° del documento: el folio_real (SMC) si ya
+    se asignó; si no, el correlativo para las históricas (< FOLIO_MANUAL_DESDE),
+    o vacío para las nuevas (se rellena a mano)."""
+    fr = str(cabecera.get("folio_real") or "").strip()
+    if fr:
+        return fr
+    corr = cabecera.get("correlativo")
+    try:
+        if corr is not None and int(corr) < FOLIO_MANUAL_DESDE:
+            return str(corr)
+    except (TypeError, ValueError):
+        pass
+    return ""
+
+
 def _encabezado(c, titulo, correlativo):
     """Bloque institucional a la izquierda, recuadro del N° a la derecha,
     y el título en su propia franja (así no se encima con nada)."""
@@ -303,7 +328,9 @@ def generar_solicitud_pdf(ruta_salida, cabecera, items):
     x_num = ANCHO - MARGEN - 70
     c.drawString(x_num - ancho_etiqueta, y, etiqueta_num)
     c.setFont("Helvetica-Bold", 11)
-    c.drawString(x_num + 4, y, str(cabecera.get("correlativo") or ""))
+    # Para las solicitudes nuevas queda en blanco: el folio real (SMC) se escribe
+    # a mano sobre esta línea (ver numero_folio_impreso / FOLIO_MANUAL_DESDE).
+    c.drawString(x_num + 4, y, numero_folio_impreso(cabecera))
     c.setLineWidth(0.6)
     c.line(x_num, y - 3, ANCHO - MARGEN, y - 3)
 
@@ -444,7 +471,7 @@ def _cabecera_comprobante(c, cabecera, y_inicio=None):
     tipo_mov = cabecera.get("tipo_movimiento") or TIPO_MOVIMIENTO_POR_DEFECTO
     destino = cabecera.get("destino") or DESTINO_POR_DEFECTO
     izq = [
-        (ETIQUETA_TRANSACCION, cabecera.get("correlativo")),
+        (ETIQUETA_TRANSACCION, numero_folio_impreso(cabecera)),
         (ETIQUETA_DEPTO_ORIGEN, cabecera.get("depto_origen") or cabecera.get("area_departamento")),
         (ETIQUETA_TIPO_MOV, f"*** {tipo_mov} ***"),
         (ETIQUETA_DESTINO, f"*** {destino} ***"),
