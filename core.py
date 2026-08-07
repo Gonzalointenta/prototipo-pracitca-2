@@ -256,7 +256,8 @@ ESQUEMA_SQL = \
             fecha_venc TEXT,
             lote TEXT,
             activo INTEGER DEFAULT 1,
-            historico INTEGER DEFAULT 0
+            historico INTEGER DEFAULT 0,
+            oculto INTEGER DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS alias_productos (
@@ -428,6 +429,11 @@ def init_db(db_path: str = None) -> None:
         # tiene stock real. Se "gradúa" a historico=0 cuando el escaneo SMC le
         # trae saldo (ver importar_saldos_smc).
         "ALTER TABLE productos ADD COLUMN historico INTEGER DEFAULT 0",
+        # oculto=1: producto obsoleto / de solicitud muy esporádica que NO debe
+        # aparecer en el buscador (ensucia con el catálogo masivo). Permanece
+        # oculto hasta que el escaneo SMC le traiga saldo > 0 (ver
+        # importar_saldos_smc), momento en que vuelve a ser buscable.
+        "ALTER TABLE productos ADD COLUMN oculto INTEGER DEFAULT 0",
     ]
     for sql in migraciones:
         try:
@@ -996,7 +1002,7 @@ def buscar_producto(texto_busqueda: str, db_path: str = None, limite: int = 15, 
             SELECT a.texto_alias_normalizado, a.codigo_producto, p.nombre_estandar
             FROM alias_productos a
             JOIN productos p ON a.codigo_producto = p.codigo
-            WHERE p.activo = 1
+            WHERE p.activo = 1 AND p.oculto = 0
             """,
             conn,
         )
@@ -2986,6 +2992,10 @@ def importar_saldos_smc(ruta_archivo, db_path: str = None, fecha_corte=None):
         # pero fuera del inventario).
         campos = ["saldo=?", "saldo_importado=?", "fecha_corte=?", "historico=0"]
         valores = [saldo_nuevo, saldo_nuevo, fecha]
+        # Si el producto pasó a tener stock (> 0), deja de estar oculto del
+        # buscador: se muestra solo. Con saldo 0 sigue oculto.
+        if saldo_nuevo > 0:
+            campos.append("oculto=0")
         if critico_nuevo is not None:
             campos.append("stock_critico=?")
             valores.append(critico_nuevo)

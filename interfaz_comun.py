@@ -650,10 +650,18 @@ def panel_nueva_solicitud(es_encargado: bool, identidad: dict = None):
     busqueda = st.text_input("Busque el producto que desea", key=f"busqueda_input_{n}")
 
     if busqueda:
-        # Se muestran hasta 5 coincidencias y se corta en 45%: con la carga
-        # masiva del catálogo maestro, bajar de ahí solo agregaba ruido. Debajo
-        # de 45% no aparece nada.
-        candidatos = core.buscar_producto(busqueda, umbral=45, limite=5)
+        # Buscador afinado tras la carga masiva del catálogo maestro:
+        #  - umbral 60%: debajo de eso no aparece nada (evita productos sin
+        #    relación); si solo 4 superan el 60%, salen esos 4.
+        #  - si hay una coincidencia EXACTA (100%), se muestra esa + hasta 4
+        #    alternativas que lleguen al 75% (bar más alto: lo que va al lado de
+        #    una coincidencia exacta tiene que ser muy cercano), para que el
+        #    filtro sea más preciso.
+        _raw = core.buscar_producto(busqueda, umbral=60, limite=8)
+        if _raw and _raw[0][2] >= 99.5:
+            candidatos = [_raw[0]] + [c for c in _raw[1:] if c[2] >= 75][:4]
+        else:
+            candidatos = _raw[:5]
         if candidatos:
             opciones = [
                 etiqueta_candidato(nombre, score, codigo if es_encargado else None)
